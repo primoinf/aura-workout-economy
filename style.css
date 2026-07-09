@@ -1248,3 +1248,16 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus {
   color: #fff;
 }
 
+/* Personal Finance History logs item row */
+.weekly-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.weekly-history-item:last-child {
+  border-bottom: none;
+}
+
