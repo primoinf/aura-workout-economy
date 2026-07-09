@@ -282,7 +282,82 @@
         </div>
       </section>
 
-      <!-- 4. More View (Settings & Data) -->
+      <!-- 4. Finance View (Income/Expense Ledger) -->
+      <section id="pane-finance" class="pane">
+        <h1 class="pane-title" id="txt-finance-title">Finance</h1>
+        <p class="pane-subtitle" id="txt-finance-subtitle">Cash Income & Expense Tracker</p>
+
+        <!-- Net Balance Card -->
+        <div class="coin-balance-card glass">
+          <div class="balance-title" id="txt-finance-balance">Net Balance</div>
+          <div class="balance-amount">
+            <span style="font-size: 32px; font-weight: 700; color: var(--color-primary); margin-right: 2px;">฿</span>
+            <span id="cash-balance-value" style="font-family: var(--font-brand); font-size: 44px; font-weight: 800; letter-spacing: -1px; line-height: 1;">0.00</span>
+          </div>
+          
+          <!-- Income / Expense breakdown row -->
+          <div style="display: flex; width: 100%; justify-content: space-around; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-color);">
+            <div style="text-align: center;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;" id="txt-total-income">Income</div>
+              <div style="font-family: var(--font-brand); font-size: 18px; font-weight: 800; color: var(--color-primary);" id="cash-income-value">฿0.00</div>
+            </div>
+            <div style="width: 1px; background-color: var(--border-color);"></div>
+            <div style="text-align: center;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;" id="txt-total-expense">Expense</div>
+              <div style="font-family: var(--font-brand); font-size: 18px; font-weight: 800; color: var(--color-danger);" id="cash-expense-value">฿0.00</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Log a cash transaction -->
+        <div class="planner-card glass">
+          <h3 class="card-inner-title" id="txt-log-finance-header">Log Transaction</h3>
+          
+          <!-- Transaction Type Toggle Pills -->
+          <div class="form-group" style="margin-top: 14px;">
+            <div class="type-pill-selector" style="display: flex; gap: 8px; width: 100%;">
+              <button class="cash-type-btn active" data-type="expense" style="flex: 1; padding: 10px; font-family: var(--font-brand); font-weight: 700; border-radius: 12px; border: 2px solid var(--border-color); cursor: pointer;" id="btn-cash-expense">Expense</button>
+              <button class="cash-type-btn" data-type="income" style="flex: 1; padding: 10px; font-family: var(--font-brand); font-weight: 700; border-radius: 12px; border: 2px solid var(--border-color); cursor: pointer;" id="btn-cash-income">Income</button>
+            </div>
+          </div>
+
+          <div class="form-grid-2" style="margin-top: 14px;">
+            <!-- Category dropdown -->
+            <div class="form-group">
+              <label id="txt-cash-category">Category</label>
+              <select id="cash-input-category">
+                <!-- Dynamically populated based on type -->
+              </select>
+            </div>
+            <!-- Amount -->
+            <div class="form-group">
+              <label id="txt-cash-amount">Amount (฿)</label>
+              <input type="number" id="cash-input-amount" placeholder="e.g. 100" min="1">
+            </div>
+          </div>
+
+          <!-- Description -->
+          <div class="form-group" style="margin-top: 12px;">
+            <label id="txt-cash-desc">Description</label>
+            <input type="text" id="cash-input-desc" placeholder="e.g. Lunch at cafe">
+          </div>
+
+          <button id="save-cash-btn" class="primary-btn-full" style="margin-top: 20px;">
+            <i data-lucide="check" style="width:16px;height:16px;margin-right:6px;"></i>
+            <span id="txt-save-cash">Save</span>
+          </button>
+        </div>
+
+        <!-- Transaction history log -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <h3 class="card-inner-title" id="txt-finance-history">History Logs</h3>
+          <div id="cash-history-list" class="weekly-history-list" style="margin-top: 14px;">
+            <!-- Cash history records list -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. More View (Settings & Data) -->
       <section id="pane-more" class="pane">
         <h1 class="pane-title" id="txt-more-title">More</h1>
         <p class="pane-subtitle" id="txt-more-subtitle">App configurations and data tools</p>
@@ -334,6 +409,10 @@
       <button class="nav-btn" data-target="pane-fit">
         <i data-lucide="dumbbell"></i>
         <span class="nav-label" data-key="nav_fit">Fit</span>
+      </button>
+      <button class="nav-btn" data-target="pane-finance">
+        <i data-lucide="wallet"></i>
+        <span class="nav-label" data-key="nav_finance">Finance</span>
       </button>
       <button class="nav-btn" data-target="pane-more">
         <i data-lucide="more-horizontal"></i>

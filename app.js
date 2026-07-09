@@ -14,7 +14,8 @@ const DEFAULT_STATE = {
   currentLanguage: 'en',
   darkMode: false,
   fitStreak: 0,
-  foodStreak: 0
+  foodStreak: 0,
+  cashTransactions: [] // { id, date, type: 'income'|'expense', amount, category, desc }
 };
 
 // State Manager
@@ -85,6 +86,20 @@ const TRANSLATIONS = {
     "nav_home": "Home",
     "nav_food": "Food",
     "nav_more": "More",
+    "nav_finance": "Finance",
+    "txt-finance-title": "Finance",
+    "txt-finance-subtitle": "Cash Income & Expense Tracker",
+    "txt-finance-balance": "Net Balance",
+    "txt-total-income": "Income",
+    "txt-total-expense": "Expense",
+    "txt-log-finance-header": "Log Transaction",
+    "btn-cash-expense": "Expense",
+    "btn-cash-income": "Income",
+    "txt-cash-category": "Category",
+    "txt-cash-amount": "Amount (฿)",
+    "txt-cash-desc": "Description",
+    "txt-save-cash": "Save",
+    "txt-finance-history": "History Logs",
     "txt-redeem-history-title": "Redemption Logs",
     "no_redeems": "No rewards redeemed yet.",
 
@@ -166,10 +181,24 @@ const TRANSLATIONS = {
     "meal_snack": "ของว่าง",
 
     // Navigation
-    "nav_home": "บอร์ดหลัก",
-    "nav_food": "อาหาร",
-    "nav_fit": "ฟิตเนส",
+    "nav_home": "แดชบอร์ด",
+    "nav_food": "มื้ออาหาร",
+    "nav_fit": "ออกกำลังกาย",
+    "nav_finance": "รายรับ-รายจ่าย",
     "nav_more": "ตั้งค่า",
+    "txt-finance-title": "บัญชี",
+    "txt-finance-subtitle": "บันทึกรายรับ-รายจ่ายเงินบาทจริง (฿)",
+    "txt-finance-balance": "ยอดคงเหลือ",
+    "txt-total-income": "รายรับรวม",
+    "txt-total-expense": "รายจ่ายรวม",
+    "txt-log-finance-header": "จดรายรับ-รายจ่าย",
+    "btn-cash-expense": "รายจ่าย",
+    "btn-cash-income": "รายรับ",
+    "txt-cash-category": "หมวดหมู่",
+    "txt-cash-amount": "จำนวนเงิน (฿)",
+    "txt-cash-desc": "รายละเอียด",
+    "txt-save-cash": "บันทึก",
+    "txt-finance-history": "ประวัติธุรกรรม",
     "txt-redeem-history-title": "ประวัติการแลกของรางวัล",
     "no_redeems": "ยังไม่มีประวัติการแลกของรางวัล",
 
@@ -236,6 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initHomeShopController();
   initFoodController();
   initFitController();
+  initFinanceController();
   initMoreController();
   
   // Activate initial Lucide Icons
@@ -264,6 +294,9 @@ function initRouter() {
       if (target === 'pane-fit') {
         drawCoinFlowChart();
       }
+      if (target === 'pane-finance') {
+        renderFinanceUI();
+      }
     });
   });
 }
@@ -277,6 +310,7 @@ function initStateAndUI() {
     state.treats = [...DEFAULT_STATE.treats];
   }
   if (!state.transactions) state.transactions = [];
+  if (!state.cashTransactions) state.cashTransactions = [];
 
   // Theme Sync
   if (state.darkMode) {
@@ -1045,6 +1079,8 @@ function initMoreController() {
     renderTreatShop();
     renderFoodUI();
     renderFitUI();
+    populateCashCategories();
+    renderFinanceUI();
   });
 
   // Backup Export
@@ -1078,6 +1114,8 @@ function initMoreController() {
           renderTreatShop();
           renderFoodUI();
           renderFitUI();
+          populateCashCategories();
+          renderFinanceUI();
           
           alert(t('import_success'));
         } else {
@@ -1102,6 +1140,196 @@ function initMoreController() {
       renderTreatShop();
       renderFoodUI();
       renderFitUI();
+      populateCashCategories();
+      renderFinanceUI();
     }
   });
+}
+
+// ----------------------------------------------------
+// Personal Finance Logic (Income & Expense)
+// ----------------------------------------------------
+
+const FINANCE_CATEGORIES = {
+  expense: {
+    en: ['Food', 'Travel', 'Shopping', 'Bills', 'Others'],
+    th: ['อาหาร', 'เดินทาง', 'ช็อปปิ้ง', 'ค่าสาธารณูปโภค/บิล', 'อื่นๆ']
+  },
+  income: {
+    en: ['Salary', 'Investment', 'Others'],
+    th: ['เงินเดือน', 'การลงทุน', 'อื่นๆ']
+  }
+};
+
+let currentCashType = 'expense';
+
+function initFinanceController() {
+  const typeBtns = document.querySelectorAll('.cash-type-btn');
+  const categorySelect = document.getElementById('cash-input-category');
+  const amountInput = document.getElementById('cash-input-amount');
+  const descInput = document.getElementById('cash-input-desc');
+  const saveBtn = document.getElementById('save-cash-btn');
+
+  if (!saveBtn) return;
+
+  // Toggle Type
+  typeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      typeBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentCashType = btn.getAttribute('data-type');
+      populateCashCategories();
+    });
+  });
+
+  // Save Transaction
+  saveBtn.addEventListener('click', () => {
+    const amount = parseFloat(amountInput.value);
+    const desc = descInput.value.trim();
+    const category = categorySelect.value;
+
+    if (isNaN(amount) || amount <= 0) {
+      alert(state.currentLanguage === 'th' ? 'กรุณาระบุจำนวนเงินที่ถูกต้อง' : 'Please enter a valid amount.');
+      return;
+    }
+
+    const newTx = {
+      id: Date.now(),
+      date: getTodayString(),
+      type: currentCashType,
+      category: category,
+      amount: amount,
+      desc: desc
+    };
+
+    state.cashTransactions.push(newTx);
+    saveState();
+    
+    // Clear inputs
+    amountInput.value = '';
+    descInput.value = '';
+
+    renderFinanceUI();
+  });
+
+  populateCashCategories();
+  renderFinanceUI();
+}
+
+function populateCashCategories() {
+  const categorySelect = document.getElementById('cash-input-category');
+  if (!categorySelect) return;
+  categorySelect.innerHTML = '';
+
+  const lang = state.currentLanguage || 'en';
+  const cats = FINANCE_CATEGORIES[currentCashType][lang];
+  cats.forEach(cat => {
+    const opt = document.createElement('option');
+    opt.value = cat;
+    opt.textContent = cat;
+    categorySelect.appendChild(opt);
+  });
+}
+
+function renderFinanceUI() {
+  const balanceVal = document.getElementById('cash-balance-value');
+  const incomeVal = document.getElementById('cash-income-value');
+  const expenseVal = document.getElementById('cash-expense-value');
+  const listContainer = document.getElementById('cash-history-list');
+
+  if (!balanceVal) return;
+
+  // Calculate totals
+  let totalIncome = 0;
+  let totalExpense = 0;
+
+  state.cashTransactions.forEach(tx => {
+    if (tx.type === 'income') {
+      totalIncome += tx.amount;
+    } else {
+      totalExpense += tx.amount;
+    }
+  });
+
+  const netBalance = totalIncome - totalExpense;
+
+  // Format currency
+  balanceVal.textContent = netBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  incomeVal.textContent = `฿${totalIncome.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  expenseVal.textContent = `฿${totalExpense.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  // Set net balance color based on positive/negative
+  if (netBalance >= 0) {
+    balanceVal.style.color = 'var(--color-primary)';
+  } else {
+    balanceVal.style.color = 'var(--color-danger)';
+  }
+
+  // Render History List
+  listContainer.innerHTML = '';
+  if (state.cashTransactions.length === 0) {
+    listContainer.innerHTML = `
+      <div style="text-align: center; padding: 20px; color: var(--text-muted); font-size: 13px;">
+        ${state.currentLanguage === 'th' ? 'ไม่มีบันทึกรายรับ-รายจ่าย' : 'No transactions recorded yet.'}
+      </div>
+    `;
+    return;
+  }
+
+  // Sort latest first
+  const sorted = [...state.cashTransactions].sort((a, b) => b.id - a.id);
+
+  sorted.forEach(tx => {
+    const item = document.createElement('div');
+    item.className = 'weekly-history-item';
+    item.style.padding = '12px 14px';
+
+    const isIncome = tx.type === 'income';
+    const colorClass = isIncome ? 'color: var(--color-primary); font-weight: 700;' : 'color: var(--color-danger); font-weight: 700;';
+    const prefix = isIncome ? '+' : '-';
+    
+    // Choose appropriate emoji based on category
+    let emoji = '💰';
+    if (tx.type === 'expense') {
+      if (tx.category.includes('อาหาร') || tx.category.toLowerCase().includes('food')) emoji = '🍲';
+      else if (tx.category.includes('เดินทาง') || tx.category.toLowerCase().includes('travel')) emoji = '🚗';
+      else if (tx.category.includes('ช็อปปิ้ง') || tx.category.toLowerCase().includes('shop')) emoji = '🛍️';
+      else if (tx.category.includes('บิล') || tx.category.toLowerCase().includes('bill')) emoji = '📄';
+      else emoji = '💸';
+    } else {
+      if (tx.category.includes('เงินเดือน') || tx.category.toLowerCase().includes('salary')) emoji = '💼';
+      else if (tx.category.includes('ลงทุน') || tx.category.toLowerCase().includes('invest')) emoji = '📈';
+      else emoji = '💵';
+    }
+
+    item.innerHTML = `
+      <div class="weekly-item-main" style="display: flex; align-items: center; gap: 10px; flex: 1;">
+        <span style="font-size: 20px;">${emoji}</span>
+        <div>
+          <div style="font-weight: 700; font-size: 13px; color: var(--text-main);">${tx.category}</div>
+          <div style="font-size: 11px; color: var(--text-muted);">${tx.desc || (state.currentLanguage === 'th' ? 'ไม่มีคำอธิบาย' : 'No description')}</div>
+        </div>
+      </div>
+      <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end;">
+        <span style="${colorClass}">฿${prefix}${tx.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        <span style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">${formatLocalDate(tx.date)}</span>
+      </div>
+      <button class="item-delete-btn" style="background: none; border: none; color: var(--text-muted); cursor: pointer; margin-left: 8px; display: flex; align-items: center; justify-content: center; padding: 4px;" data-id="${tx.id}">
+        <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+      </button>
+    `;
+
+    // Hook up delete listener
+    item.querySelector('.item-delete-btn').addEventListener('click', () => {
+      if (confirm(state.currentLanguage === 'th' ? 'ต้องการลบบันทึกนี้ใช่หรือไม่?' : 'Delete this transaction?')) {
+        state.cashTransactions = state.cashTransactions.filter(t => t.id !== tx.id);
+        saveState();
+        renderFinanceUI();
+      }
+    });
+
+    listContainer.appendChild(item);
+  });
+
+  safeCreateIcons();
 }

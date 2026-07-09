@@ -1224,3 +1224,27 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus {
   transform: scale(0.96);
 }
 
+/* Cash Transaction Type selector */
+.cash-type-btn {
+  background-color: var(--bg-card);
+  color: var(--text-main);
+  border: 2px solid var(--border-color);
+  transition: all 0.2s ease;
+}
+
+.cash-type-btn:hover {
+  background-color: var(--bg-app);
+}
+
+.cash-type-btn.active {
+  background-color: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+.cash-type-btn[data-type="expense"].active {
+  background-color: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+}
+
