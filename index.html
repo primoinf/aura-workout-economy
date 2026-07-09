@@ -10,6 +10,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    if (typeof lucide === 'undefined') {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.399.0/umd/lucide.min.js"><\\/script>');
+    }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>

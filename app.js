@@ -216,6 +216,16 @@ function formatLocalDate(dateStr) {
   return `${month}/${day}/${year}`;
 }
 
+function safeCreateIcons() {
+  try {
+    if (typeof lucide !== 'undefined') {
+      lucide.createIcons();
+    }
+  } catch (e) {
+    console.warn("Lucide icons failed to load:", e);
+  }
+}
+
 // ----------------------------------------------------
 // UI Logic & Router Setup
 // ----------------------------------------------------
@@ -229,7 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMoreController();
   
   // Activate initial Lucide Icons
-  lucide.createIcons();
+  safeCreateIcons();
 });
 
 function initRouter() {
@@ -442,7 +452,7 @@ function renderTreatShop() {
     listContainer.appendChild(card);
   });
 
-  lucide.createIcons();
+  safeCreateIcons();
 }
 
 function purchaseTreat(id) {
@@ -564,7 +574,7 @@ function render30DaysGrid(moduleKey) {
     gridContainer.appendChild(dot);
   }
 
-  lucide.createIcons();
+  safeCreateIcons();
 
   // Display streak value
   updateStreakCounterDisplay(moduleKey);
@@ -1022,7 +1032,7 @@ function initMoreController() {
       document.body.classList.remove('dark-theme');
       document.getElementById('theme-icon').setAttribute('data-lucide', 'moon');
     }
-    lucide.createIcons();
+    safeCreateIcons();
   });
 
   // Language Toggle Switcher
