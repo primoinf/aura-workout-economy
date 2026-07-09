@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Aura - Workout Coin Economy</title>
+  <!-- Google Fonts: Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Ambient backdrop planner theme grids -->
+  <div class="planner-grid-bg"></div>
+
+  <div class="app-shell">
+    <!-- Top System Bar -->
+    <header class="app-header">
+      <div class="header-main">
+        <div class="brand">
+          <span class="brand-text" id="txt-brand-name">Aura</span>
+        </div>
+        <div class="header-actions">
+          <span class="sync-pill">
+            <i data-lucide="check" class="sync-icon"></i>
+            <span id="txt-synced">Synced</span>
+          </span>
+          <button id="theme-toggle-btn" class="icon-btn-pill" aria-label="Toggle Theme">
+            <i data-lucide="moon" id="theme-icon"></i>
+          </button>
+          <button id="lang-toggle-btn" class="icon-btn-pill" aria-label="Toggle Language">
+            <span class="lang-text">EN</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Tab Views -->
+    <main class="app-content">
+      
+      <!-- 1. Home View -->
+      <section id="pane-home" class="pane active">
+        <div class="coin-balance-card glass">
+          <div class="balance-title" id="txt-my-balance">My Balance</div>
+          <div class="balance-amount">
+            <span class="coin-symbol">🪙</span>
+            <span id="coin-value">0</span>
+            <span class="coin-label" id="txt-coins-lbl">coins</span>
+          </div>
+        </div>
+
+        <!-- AI Coach Dr. Yuna -->
+        <div class="coach-card glass" style="margin-bottom: 20px;">
+          <div class="coach-avatar">🩺</div>
+          <div class="coach-content">
+            <div class="coach-name" id="txt-coach-name">Dr. Yuna</div>
+            <div class="coach-message" id="coach-message-display">Let's get moving today! Every workout builds your coin balance.</div>
+          </div>
+        </div>
+
+        <!-- Today Summary Card -->
+        <div class="card-section">
+          <h2 class="section-title" id="txt-today-summary">Today's Logs</h2>
+          <div class="today-logs-box glass">
+            <div class="log-row">
+              <div class="log-indicator">
+                <i data-lucide="dumbbell"></i>
+                <span id="txt-today-workouts">Workouts logged</span>
+              </div>
+              <span class="log-count" id="today-workout-count">0</span>
+            </div>
+            <div class="log-row">
+              <div class="log-indicator">
+                <i data-lucide="utensils"></i>
+                <span id="txt-today-meals">Meals logged</span>
+              </div>
+              <span class="log-count" id="today-meal-count">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Redeemed History Card -->
+        <div class="card-section" style="margin-top: 20px;">
+          <h2 class="section-title" id="txt-redeem-history-title">Redemption Logs</h2>
+          <div class="today-logs-box glass">
+            <div id="redeem-history-list" class="weekly-history-list" style="padding: 4px 0;">
+              <!-- Dynamically populated redeem logs list -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Food View -->
+      <section id="pane-food" class="pane">
+        <h1 class="pane-title" id="txt-food-title">Food</h1>
+        <p class="pane-subtitle" id="txt-food-subtitle">Meals + logging streak</p>
+
+        <!-- Log a Meal Card -->
+        <div class="planner-card glass">
+          <h3 class="card-inner-title" id="txt-log-meal-header">Log a meal</h3>
+          <div class="meal-type-selector">
+            <button class="meal-btn active" data-meal="Breakfast" data-key="meal_breakfast">Breakfast</button>
+            <button class="meal-btn" data-meal="Lunch" data-key="meal_lunch">Lunch</button>
+            <button class="meal-btn" data-meal="Dinner" data-key="meal_dinner">Dinner</button>
+            <button class="meal-btn" data-meal="Snack" data-key="meal_snack">Snack</button>
+          </div>
+          <div class="form-group" style="margin-top: 14px;">
+            <label id="txt-what-eat-lbl">What did you eat?</label>
+            <input type="text" id="meal-input-desc" placeholder="e.g. chicken rice + fried egg">
+          </div>
+          <button id="save-meal-btn" class="primary-btn-full" style="margin-top: 16px;">
+            <i data-lucide="check" style="width:16px;height:16px;margin-right:6px;"></i>
+            <span id="txt-save-meal">Save</span>
+          </button>
+        </div>
+
+        <!-- 30 Days Streak Grid -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <div class="card-header-between">
+            <span class="card-inner-title" id="txt-food-streak">Streak</span>
+            <span class="small-meta-title" id="txt-last-30">last 30 days</span>
+          </div>
+          <div class="streak-summary-desc">
+            <span class="big-streak-number" id="food-streak-count">0</span>
+            <span class="streak-desc-text" id="txt-food-streak-desc">days logged in a row — like writing the diary every night</span>
+          </div>
+          <div class="streak-grid" id="food-streak-grid">
+            <!-- 30 circles dynamically drawn -->
+          </div>
+        </div>
+
+        <!-- Weekly logged items list -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <h3 class="card-inner-title" id="txt-food-this-week">This week</h3>
+          <div id="weekly-meals-list" class="weekly-history-list">
+            <!-- Meals list by day -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Fit View -->
+      <section id="pane-fit" class="pane">
+        <h1 class="pane-title" id="txt-fit-title">Fit</h1>
+        <p class="pane-subtitle" id="txt-fit-subtitle">Workout coin economy</p>
+
+        <!-- Weekly Quest -->
+        <div class="planner-card glass" style="margin-bottom: 20px;">
+          <div class="card-header-between">
+            <span class="card-inner-title" id="txt-quest-title">Weekly quest</span>
+            <span class="quest-bonus-tag">+100 bonus</span>
+          </div>
+          <p class="quest-instructions" id="txt-quest-desc">Five cardio or walk sessions this week — let's keep that heart happily pumping. 💗</p>
+          <div class="quest-progress-bar-bg">
+            <div class="quest-progress-fill" id="quest-progress-fill" style="width: 0%"></div>
+          </div>
+          <div class="quest-progress-ratio" id="quest-progress-ratio">0/5 this week</div>
+        </div>
+
+        <!-- Workout Logger Form (Pills layout matching screenshot) -->
+        <div class="planner-card glass">
+          <h3 class="card-inner-title" id="txt-log-workout-header">Log a workout</h3>
+          
+          <!-- Workout Type Toggle Pills -->
+          <div class="form-group" style="margin-top: 14px;">
+            <label id="txt-workout-type">Log a workout</label>
+            <div class="type-pill-selector">
+              <button class="type-pill-btn active" data-type="Gym" data-key="w_gym">Gym</button>
+              <button class="type-pill-btn" data-type="Cardio" data-key="w_cardio">Cardio</button>
+              <button class="type-pill-btn" data-type="Bodyweight" data-key="w_bodyweight">Bodyweight</button>
+              <button class="type-pill-btn" data-type="Walking" data-key="w_walk">Walking</button>
+            </div>
+          </div>
+
+          <!-- Minutes Input Underlined -->
+          <div class="form-group" style="margin-top: 16px;">
+            <label id="txt-workout-duration">Minutes</label>
+            <input type="number" id="workout-input-duration" class="underlined-input" placeholder="45" value="45" min="1">
+          </div>
+
+          <!-- Intensity Toggle Pills -->
+          <div class="form-group" style="margin-top: 16px;">
+            <label id="txt-workout-intensity">Intensity</label>
+            <div class="intensity-pill-selector">
+              <button class="intensity-pill-btn" data-intensity="Light" data-key="i_low">Light</button>
+              <button class="intensity-pill-btn active" data-intensity="Moderate" data-key="i_medium">Moderate</button>
+              <button class="intensity-pill-btn" data-intensity="Hard" data-key="i_high">Hard</button>
+            </div>
+          </div>
+
+          <button id="save-workout-btn" class="primary-btn-full" style="margin-top: 20px;">
+            <i data-lucide="check" style="width:16px;height:16px;margin-right:6px;"></i>
+            <span id="txt-save-workout">Save</span>
+          </button>
+        </div>
+
+        <!-- Treat Shop Card Section (Now in Fit Tab below logger) -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <div class="card-header-between">
+            <span class="card-inner-title" id="txt-shop-title">Treat shop</span>
+            <span class="small-meta-title" id="txt-shop-meta">never below 0</span>
+          </div>
+
+          <div class="section-header-row" style="margin-bottom: 12px;">
+            <div></div> <!-- Spacer -->
+            <button id="add-treat-btn" class="text-action-btn">
+              <i data-lucide="plus" style="width:14px;height:14px;"></i>
+              <span id="txt-new-treat">Add Treat</span>
+            </button>
+          </div>
+
+          <!-- Add Treat Overlay Input Form -->
+          <div id="treat-form-container" class="overlay-form glass hidden" style="border: 2px solid var(--color-primary); margin-bottom: 14px;">
+            <h3 id="txt-add-treat-header">New Custom Treat</h3>
+            <div class="form-group">
+              <input type="text" id="treat-input-name" placeholder="Treat name (e.g. Bubble Tea)..." maxlength="30">
+            </div>
+            <div class="form-group">
+              <input type="text" id="treat-input-emoji" placeholder="Emoji (e.g. 🥭, 🍦, ☕)..." maxlength="5">
+            </div>
+            <div class="form-group">
+              <input type="number" id="treat-input-cost" placeholder="Cost in coins (e.g. 50)..." min="1">
+            </div>
+            <div class="form-actions">
+              <button id="treat-cancel-btn" class="secondary-btn">Cancel</button>
+              <button id="treat-save-btn" class="primary-btn">Save</button>
+            </div>
+          </div>
+
+          <div id="treats-list" class="treats-grid-two-column">
+            <!-- Dynamically populated treats matching screenshot cards layout -->
+          </div>
+        </div>
+
+        <!-- 30 Days Workout Streak Grid -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <div class="card-header-between">
+            <span class="card-inner-title" id="txt-fit-streak">Streak</span>
+            <span class="small-meta-title" id="txt-tap-day">tap a day</span>
+          </div>
+          <div class="streak-grid" id="fit-streak-grid">
+            <!-- 30 circles dynamically drawn -->
+          </div>
+        </div>
+
+        <!-- Weekly logged workouts list -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <h3 class="card-inner-title" id="txt-fit-this-week">This week</h3>
+          <div id="weekly-workouts-list" class="weekly-history-list">
+            <!-- Workouts list by day -->
+          </div>
+        </div>
+
+        <!-- Coin Flow 30 days Chart -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <div class="card-header-between">
+            <span class="card-inner-title" id="txt-chart-title">Coin flow</span>
+            <span class="small-meta-title" id="txt-chart-days">30 days</span>
+          </div>
+          
+          <div class="chart-wrapper">
+            <div class="chart-y-axis">
+              <span>+60</span>
+              <span>0</span>
+              <span>-60</span>
+            </div>
+            <div class="chart-bars-container" id="chart-bars-container">
+              <!-- Dynamically populated SVG or CSS bars -->
+            </div>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-color color-earned"></span><span id="txt-earned-lbl">Earned</span></span>
+            <span class="legend-item"><span class="legend-color color-spent"></span><span id="txt-spent-lbl">Spent</span></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. More View (Settings & Data) -->
+      <section id="pane-more" class="pane">
+        <h1 class="pane-title" id="txt-more-title">More</h1>
+        <p class="pane-subtitle" id="txt-more-subtitle">App configurations and data tools</p>
+
+        <div class="planner-card glass">
+          <h3 class="card-inner-title" id="txt-data-tools">Data Management</h3>
+          <p class="card-inner-desc" id="txt-data-tools-desc">Your workouts and coins are stored privately in your browser cache. You can backup your profile to a file or restore it below.</p>
+          
+          <div class="data-actions-grid">
+            <button id="backup-btn" class="outline-action-btn">
+              <i data-lucide="download"></i>
+              <span id="txt-export-btn-lbl">Export JSON</span>
+            </button>
+            <button id="restore-btn" class="outline-action-btn">
+              <i data-lucide="upload"></i>
+              <span id="txt-import-btn-lbl">Import JSON</span>
+            </button>
+            <input type="file" id="import-file-input" accept=".json" class="hidden">
+          </div>
+        </div>
+
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <h3 class="card-inner-title" id="txt-reset-section">Reset Options</h3>
+          <p class="card-inner-desc" id="txt-reset-desc">Clear all data and start completely fresh. This action cannot be undone.</p>
+          <button id="reset-data-btn" class="danger-btn">
+            <i data-lucide="trash-2" style="width: 16px; height: 16px; margin-right: 6px;"></i>
+            <span id="txt-reset-btn-lbl">Reset Workspace</span>
+          </button>
+        </div>
+
+        <div class="app-credit">
+          <div class="credit-title">Aura Workout Economy</div>
+          <div class="credit-version">Version 2.0.0</div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Bottom Navigation Bar -->
+    <nav class="app-nav">
+      <button class="nav-btn active" data-target="pane-home">
+        <i data-lucide="home"></i>
+        <span class="nav-label" data-key="nav_home">Home</span>
+      </button>
+      <button class="nav-btn" data-target="pane-food">
+        <i data-lucide="salad"></i>
+        <span class="nav-label" data-key="nav_food">Food</span>
+      </button>
+      <button class="nav-btn" data-target="pane-fit">
+        <i data-lucide="dumbbell"></i>
+        <span class="nav-label" data-key="nav_fit">Fit</span>
+      </button>
+      <button class="nav-btn" data-target="pane-more">
+        <i data-lucide="more-horizontal"></i>
+        <span class="nav-label" data-key="nav_more">More</span>
+      </button>
+    </nav>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
