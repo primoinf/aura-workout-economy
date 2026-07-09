@@ -288,6 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initFitController();
   initFinanceController();
   initMoreController();
+  initPullToRefresh();
   
   // Activate initial Lucide Icons
   safeCreateIcons();
@@ -1606,4 +1607,104 @@ function unionById(arr1, arr2) {
   arr2.forEach(item => map.set(item.id, item));
   
   return Array.from(map.values());
+}
+
+// ----------------------------------------------------
+// Pull to Refresh Touch Interactions Logic
+// ----------------------------------------------------
+
+function initPullToRefresh() {
+  const mainContent = document.querySelector('.app-content');
+  const indicator = document.getElementById('pull-refresh-indicator');
+  const textEl = document.getElementById('txt-pull-refresh');
+
+  if (!mainContent || !indicator) return;
+
+  let startY = 0;
+  let currentY = 0;
+  let pulling = false;
+  const threshold = 65; // drag threshold to trigger refresh (px)
+
+  mainContent.addEventListener('touchstart', (e) => {
+    // Only trigger if scrollable area is at the top
+    if (mainContent.scrollTop === 0) {
+      startY = e.touches[0].pageY;
+      pulling = true;
+      mainContent.style.transition = 'none';
+      indicator.style.transition = 'none';
+    }
+  }, { passive: true });
+
+  mainContent.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+
+    if (mainContent.scrollTop > 0) {
+      pulling = false;
+      resetPullToRefresh();
+      return;
+    }
+
+    currentY = e.touches[0].pageY;
+    const diff = currentY - startY;
+
+    if (diff > 0) {
+      // Apply drag resistance (logarithmic ease)
+      const dragDist = Math.min(threshold * 1.5, diff * 0.45);
+      
+      mainContent.style.transform = `translateY(${dragDist}px)`;
+      indicator.style.opacity = Math.min(1, dragDist / threshold);
+      
+      if (dragDist >= threshold) {
+        textEl.textContent = state.currentLanguage === 'th' ? 'ปล่อยเพื่อซิงค์ข้อมูล...' : 'Release to sync...';
+      } else {
+        textEl.textContent = state.currentLanguage === 'th' ? 'ดึงลงเพื่อซิงค์ข้อมูล...' : 'Pull to sync...';
+      }
+    }
+  }, { passive: true });
+
+  mainContent.addEventListener('touchend', async (e) => {
+    if (!pulling) return;
+    pulling = false;
+
+    const diff = currentY - startY;
+    const dragDist = Math.min(threshold * 1.5, diff * 0.45);
+
+    if (dragDist >= threshold && state.githubSettings && state.githubSettings.token) {
+      // Trigger sync
+      mainContent.style.transition = 'transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.15)';
+      mainContent.style.transform = 'translateY(50px)';
+      
+      indicator.style.transition = 'opacity 0.2s ease';
+      indicator.style.opacity = '1';
+      textEl.textContent = state.currentLanguage === 'th' ? 'กำลังซิงค์...' : 'Syncing...';
+
+      const success = await syncWithGitHub('sync');
+
+      if (success) {
+        textEl.textContent = state.currentLanguage === 'th' ? 'ซิงค์ข้อมูลสำเร็จ! ✅' : 'Sync completed! ✅';
+        
+        // Refresh UI
+        initStateAndUI();
+        renderTreatShop();
+        renderFoodUI();
+        renderFitUI();
+        populateCashCategories();
+        renderFinanceUI();
+      } else {
+        textEl.textContent = state.currentLanguage === 'th' ? 'ซิงค์ล้มเหลว ❌' : 'Sync failed ❌';
+      }
+
+      // Hide pull refresh after brief delay
+      setTimeout(resetPullToRefresh, 1300);
+    } else {
+      resetPullToRefresh();
+    }
+  });
+
+  function resetPullToRefresh() {
+    mainContent.style.transition = 'transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.15)';
+    mainContent.style.transform = 'translateY(0)';
+    indicator.style.transition = 'opacity 0.2s ease';
+    indicator.style.opacity = '0';
+  }
 }
