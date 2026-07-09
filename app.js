@@ -1543,6 +1543,19 @@ async function syncWithGitHub(mode = 'sync') {
       stateToUpload = state;
     }
 
+    // Optimization: If local state is identical to remote state (omitting token), skip upload!
+    if (remoteState && stateToUpload) {
+      const cleanLocal = { ...stateToUpload };
+      cleanLocal.githubSettings = { ...cleanLocal.githubSettings, token: '' };
+      const cleanRemote = { ...remoteState };
+      cleanRemote.githubSettings = { ...cleanRemote.githubSettings, token: '' };
+
+      if (JSON.stringify(cleanLocal) === JSON.stringify(cleanRemote)) {
+        console.log("State is already in sync with GitHub, skipping upload.");
+        return true;
+      }
+    }
+
     // 3. Upload merged state back to GitHub
     const commitMsg = `sync: update aura coin data vault ${getTodayString()}`;
     const cleanState = { ...stateToUpload };
