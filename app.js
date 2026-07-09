@@ -18,6 +18,9 @@ const DEFAULT_STATE = {
   cashTransactions: [] // { id, date, type: 'income'|'expense', amount, category, desc }
 };
 
+// Default GitHub Settings structure fallback
+const DEFAULT_GITHUB_SETTINGS = { username: '', repo: '', token: '', autoSync: false };
+
 // State Manager
 let state = JSON.parse(localStorage.getItem('aura_coin_state')) || { ...DEFAULT_STATE };
 
@@ -102,6 +105,15 @@ const TRANSLATIONS = {
     "txt-finance-history": "History Logs",
     "txt-redeem-history-title": "Redemption Logs",
     "no_redeems": "No rewards redeemed yet.",
+    "txt-github-sync-title": "GitHub Cloud Sync",
+    "txt-github-sync-desc": "Sync your data securely between your PC and mobile device using a private GitHub repository.",
+    "lbl-github-username": "GitHub Username",
+    "lbl-github-repo": "Repository Name",
+    "lbl-github-token": "Personal Access Token (PAT)",
+    "txt-token-link": "Create token (repo scope required)",
+    "lbl-github-autosync": "Auto-Sync on Changes",
+    "txt-test-btn": "Test",
+    "txt-sync-btn": "Sync Now",
 
     // Alert and dynamics
     "buy": "Buy",
@@ -201,6 +213,15 @@ const TRANSLATIONS = {
     "txt-finance-history": "ประวัติธุรกรรม",
     "txt-redeem-history-title": "ประวัติการแลกของรางวัล",
     "no_redeems": "ยังไม่มีประวัติการแลกของรางวัล",
+    "txt-github-sync-title": "การซิงค์ข้อมูลกับ GitHub",
+    "txt-github-sync-desc": "สำรองและซิงค์ข้อมูลอย่างปลอดภัยระหว่างคอมพิวเตอร์และมือถือของคุณโดยใช้คลังเก็บข้อมูลส่วนตัวของ GitHub",
+    "lbl-github-username": "ชื่อผู้ใช้ GitHub",
+    "lbl-github-repo": "ชื่อคลังเก็บข้อมูล (Repository)",
+    "lbl-github-token": "สิทธิ์เข้าถึงส่วนตัว (Token)",
+    "txt-token-link": "สร้างสิทธิ์การซิงค์ใหม่ (ติ๊กเลือกช่อง repo)",
+    "lbl-github-autosync": "ซิงค์อัตโนมัติเมื่อมีการจดบันทึก",
+    "txt-test-btn": "ทดสอบ",
+    "txt-sync-btn": "ซิงค์ทันที",
 
     // Alert and dynamics
     "buy": "ซื้อ",
@@ -270,6 +291,32 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Activate initial Lucide Icons
   safeCreateIcons();
+
+  // Trigger initial cloud sync if enabled
+  if (state.githubSettings && state.githubSettings.autoSync) {
+    const statusEl = document.getElementById('github-sync-status');
+    if (statusEl) {
+      statusEl.textContent = state.currentLanguage === 'th' ? 'กำลังดาวน์โหลดข้อมูลล่าสุด...' : 'Downloading latest data...';
+    }
+    syncWithGitHub('sync').then(success => {
+      if (success) {
+        if (statusEl) {
+          statusEl.style.color = 'var(--color-primary)';
+          statusEl.textContent = state.currentLanguage === 'th' ? 'ซิงค์ข้อมูลกับคลาวด์แล้ว! ✅' : 'Cloud synced! ✅';
+        }
+        // Refresh UI with merged data
+        initStateAndUI();
+        renderTreatShop();
+        renderFoodUI();
+        renderFitUI();
+        populateCashCategories();
+        renderFinanceUI();
+      } else if (statusEl) {
+        statusEl.style.color = 'var(--color-danger)';
+        statusEl.textContent = state.currentLanguage === 'th' ? 'การซิงค์ข้อมูลเริ่มต้นล้มเหลว ❌' : 'Initial sync failed ❌';
+      }
+    });
+  }
 });
 
 function initRouter() {
@@ -311,6 +358,7 @@ function initStateAndUI() {
   }
   if (!state.transactions) state.transactions = [];
   if (!state.cashTransactions) state.cashTransactions = [];
+  if (!state.githubSettings) state.githubSettings = { ...DEFAULT_GITHUB_SETTINGS };
 
   // Theme Sync
   if (state.darkMode) {
@@ -332,6 +380,22 @@ function saveState() {
   updateCoinsDisplay();
   updateSummaryLogs();
   renderRedeemedHistory();
+
+  // Trigger background auto sync if enabled
+  if (state.githubSettings && state.githubSettings.autoSync) {
+    syncWithGitHub('upload').then(success => {
+      const statusEl = document.getElementById('github-sync-status');
+      if (statusEl) {
+        if (success) {
+          statusEl.style.color = 'var(--color-primary)';
+          statusEl.textContent = state.currentLanguage === 'th' ? 'ซิงค์อัตโนมัติแล้ว! ✅' : 'Auto-synced! ✅';
+        } else {
+          statusEl.style.color = 'var(--color-danger)';
+          statusEl.textContent = state.currentLanguage === 'th' ? 'การซิงค์อัตโนมัติล้มเหลว ❌' : 'Auto-sync failed ❌';
+        }
+      }
+    });
+  }
 }
 
 function updateCoinsDisplay() {
@@ -1144,6 +1208,74 @@ function initMoreController() {
       renderFinanceUI();
     }
   });
+
+  // GitHub Cloud Sync Elements & Listeners
+  const ghUserEl = document.getElementById('github-input-username');
+  const ghRepoEl = document.getElementById('github-input-repo');
+  const ghTokenEl = document.getElementById('github-input-token');
+  const ghAutoSyncEl = document.getElementById('github-input-autosync');
+
+  if (ghUserEl && state.githubSettings) {
+    ghUserEl.value = state.githubSettings.username || '';
+    ghRepoEl.value = state.githubSettings.repo || '';
+    ghTokenEl.value = state.githubSettings.token || '';
+    ghAutoSyncEl.checked = !!state.githubSettings.autoSync;
+
+    const saveSettings = () => {
+      state.githubSettings.username = ghUserEl.value.trim();
+      state.githubSettings.repo = ghRepoEl.value.trim();
+      state.githubSettings.token = ghTokenEl.value.trim();
+      state.githubSettings.autoSync = ghAutoSyncEl.checked;
+      saveState();
+    };
+
+    ghUserEl.addEventListener('input', saveSettings);
+    ghRepoEl.addEventListener('input', saveSettings);
+    ghTokenEl.addEventListener('input', saveSettings);
+    ghAutoSyncEl.addEventListener('change', saveSettings);
+
+    // Test Connection
+    document.getElementById('github-test-btn').addEventListener('click', async () => {
+      const statusEl = document.getElementById('github-sync-status');
+      if (!statusEl) return;
+      statusEl.style.color = 'var(--text-muted)';
+      statusEl.textContent = state.currentLanguage === 'th' ? 'กำลังเชื่อมต่อ...' : 'Connecting...';
+
+      const success = await testGitHubConnection();
+      if (success) {
+        statusEl.style.color = 'var(--color-primary)';
+        statusEl.textContent = state.currentLanguage === 'th' ? 'เชื่อมต่อสำเร็จ! ✅' : 'Connected successfully! ✅';
+      } else {
+        statusEl.style.color = 'var(--color-danger)';
+        statusEl.textContent = state.currentLanguage === 'th' ? 'การเชื่อมต่อล้มเหลว ❌ ตรวจสอบ Token และชื่อคลังข้อมูล' : 'Connection failed ❌ Check Token and Repo name.';
+      }
+    });
+
+    // Sync Now
+    document.getElementById('github-sync-btn').addEventListener('click', async () => {
+      const statusEl = document.getElementById('github-sync-status');
+      if (!statusEl) return;
+      statusEl.style.color = 'var(--text-muted)';
+      statusEl.textContent = state.currentLanguage === 'th' ? 'กำลังซิงค์ข้อมูล...' : 'Syncing...';
+
+      const success = await syncWithGitHub('sync');
+      if (success) {
+        statusEl.style.color = 'var(--color-primary)';
+        statusEl.textContent = state.currentLanguage === 'th' ? 'ซิงค์ข้อมูลเสร็จสิ้น! 🎉' : 'Sync completed! 🎉';
+        
+        // Refresh UI
+        initStateAndUI();
+        renderTreatShop();
+        renderFoodUI();
+        renderFitUI();
+        populateCashCategories();
+        renderFinanceUI();
+      } else {
+        statusEl.style.color = 'var(--color-danger)';
+        statusEl.textContent = state.currentLanguage === 'th' ? 'การซิงค์ข้อมูลล้มเหลว ❌' : 'Sync failed ❌';
+      }
+    });
+  }
 }
 
 // ----------------------------------------------------
@@ -1332,4 +1464,146 @@ function renderFinanceUI() {
   });
 
   safeCreateIcons();
+}
+
+// ----------------------------------------------------
+// GitHub Synchronization Services
+// ----------------------------------------------------
+
+async function testGitHubConnection() {
+  const settings = state.githubSettings;
+  if (!settings.username || !settings.repo || !settings.token) return false;
+
+  const url = `https://api.github.com/repos/${settings.username}/${settings.repo}`;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${settings.token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+    return res.ok;
+  } catch (err) {
+    console.error("GitHub Connection Test Error:", err);
+    return false;
+  }
+}
+
+async function syncWithGitHub(mode = 'sync') {
+  const settings = state.githubSettings;
+  if (!settings.username || !settings.repo || !settings.token) return false;
+
+  const path = 'data.json';
+  const url = `https://api.github.com/repos/${settings.username}/${settings.repo}/contents/${path}`;
+
+  try {
+    // 1. Fetch file content from GitHub to get current SHA and remote state
+    let remoteState = null;
+    let sha = null;
+    
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${settings.token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      sha = data.sha;
+      // Decode Base64 string safely supporting UTF-8 (Thai characters/emojis)
+      const decodedStr = decodeURIComponent(escape(atob(data.content)));
+      remoteState = JSON.parse(decodedStr);
+    } else if (res.status !== 404) {
+      // API error (not 404 not found)
+      return false;
+    }
+
+    // 2. Perform actions depending on mode
+    let stateToUpload = null;
+
+    if (mode === 'upload') {
+      // Overwrite GitHub with local state
+      stateToUpload = state;
+    } else if (mode === 'download') {
+      // Overwrite local with GitHub state
+      if (!remoteState) return false;
+      state = remoteState;
+      saveState();
+      return true;
+    } else if (mode === 'sync') {
+      // Merge local and remote state
+      if (remoteState) {
+        state = mergeStates(state, remoteState);
+        saveState();
+      }
+      stateToUpload = state;
+    }
+
+    // 3. Upload merged state back to GitHub
+    const commitMsg = `sync: update aura coin data vault ${getTodayString()}`;
+    const cleanState = { ...stateToUpload };
+    // Omit GitHub settings token for security so they don't commit it to their repository!
+    cleanState.githubSettings = { ...stateToUpload.githubSettings, token: '' };
+
+    const bodyContent = btoa(unescape(encodeURIComponent(JSON.stringify(cleanState))));
+
+    const putRes = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${settings.token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: commitMsg,
+        content: bodyContent,
+        sha: sha || undefined
+      })
+    });
+
+    return putRes.ok;
+  } catch (err) {
+    console.error("GitHub Sync Error:", err);
+    return false;
+  }
+}
+
+// Conflict-free Union Merge of two states
+function mergeStates(local, remote) {
+  const merged = { ...local };
+
+  // Sync workouts, meals, transactions, and cashTransactions by unique IDs (union)
+  merged.workouts = unionById(local.workouts, remote.workouts);
+  merged.meals = unionById(local.meals, remote.meals);
+  merged.transactions = unionById(local.transactions, remote.transactions);
+  merged.cashTransactions = unionById(local.cashTransactions, remote.cashTransactions);
+
+  // Take whichever coins count is higher or remote if local is default
+  merged.coins = Math.max(local.coins || 100, remote.coins || 100);
+
+  // Streaks
+  merged.fitStreak = Math.max(local.fitStreak || 0, remote.fitStreak || 0);
+  merged.foodStreak = Math.max(local.foodStreak || 0, remote.foodStreak || 0);
+
+  // Treats: union custom treats
+  merged.treats = unionById(local.treats, remote.treats);
+
+  // Preserve the local GitHub Settings (so their local Token is not cleared)
+  merged.githubSettings = local.githubSettings;
+
+  return merged;
+}
+
+function unionById(arr1, arr2) {
+  if (!Array.isArray(arr1)) arr1 = [];
+  if (!Array.isArray(arr2)) arr2 = [];
+  
+  const map = new Map();
+  arr1.forEach(item => map.set(item.id, item));
+  arr2.forEach(item => map.set(item.id, item));
+  
+  return Array.from(map.values());
 }

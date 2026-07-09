@@ -379,6 +379,50 @@
           </div>
         </div>
 
+        <!-- GitHub Sync Settings Card -->
+        <div class="planner-card glass" style="margin-top: 20px;">
+          <h3 class="card-inner-title" id="txt-github-sync-title">GitHub Cloud Sync</h3>
+          <p class="card-inner-desc" id="txt-github-sync-desc">Sync your data securely between your PC and mobile device using a private GitHub repository.</p>
+          
+          <div class="form-group" style="margin-top: 14px;">
+            <label id="lbl-github-username">GitHub Username</label>
+            <input type="text" id="github-input-username" placeholder="e.g. primoinf">
+          </div>
+
+          <div class="form-group" style="margin-top: 12px;">
+            <label id="lbl-github-repo">Repository Name</label>
+            <input type="text" id="github-input-repo" placeholder="e.g. aura-workout-economy">
+          </div>
+
+          <div class="form-group" style="margin-top: 12px;">
+            <label id="lbl-github-token">Personal Access Token (PAT)</label>
+            <input type="text" id="github-input-token" placeholder="ghp_XXXXXXXXXXXXXXXXXXXX" style="-webkit-text-security: disc;">
+            <span style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+              <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank" style="color: var(--color-primary); text-decoration: underline;" id="txt-token-link">Create token (repo scope required)</a>
+            </span>
+          </div>
+
+          <div class="form-group" style="margin-top: 14px; display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+            <span style="font-size: 12px; font-weight: 700; color: var(--text-main);" id="lbl-github-autosync">Auto-Sync on Changes</span>
+            <input type="checkbox" id="github-input-autosync" style="width: 20px; height: 20px; accent-color: var(--color-primary); cursor: pointer;">
+          </div>
+
+          <div style="display: flex; gap: 8px; margin-top: 18px;">
+            <button id="github-test-btn" class="secondary-btn" style="flex: 1; padding: 10px;">
+              <i data-lucide="shield-check" style="width: 14px; height: 14px; margin-right: 4px; vertical-align: middle;"></i>
+              <span id="txt-test-btn">Test</span>
+            </button>
+            <button id="github-sync-btn" class="primary-btn" style="flex: 1; padding: 10px; font-family: var(--font-brand);">
+              <i data-lucide="refresh-cw" style="width: 14px; height: 14px; margin-right: 4px; vertical-align: middle;"></i>
+              <span id="txt-sync-btn">Sync Now</span>
+            </button>
+          </div>
+
+          <div id="github-sync-status" style="margin-top: 12px; text-align: center; font-size: 11px; font-weight: 700; color: var(--text-muted);">
+            <!-- Sync status text -->
+          </div>
+        </div>
+
         <div class="planner-card glass" style="margin-top: 20px;">
           <h3 class="card-inner-title" id="txt-reset-section">Reset Options</h3>
           <p class="card-inner-desc" id="txt-reset-desc">Clear all data and start completely fresh. This action cannot be undone.</p>
