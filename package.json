@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite --port 3000 --open",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "prototype:mission": "node .scratch/codex-mission-control/prototype/mission-tui.prototype.js",
+    "prototype:mission:demo": "node .scratch/codex-mission-control/prototype/mission-tui.prototype.js --demo",
+    "prototype:mission-ui": "vite .scratch/codex-mission-control/ui-prototype --host 127.0.0.1 --port 4174",
+    "prototype:mission-ui:build": "vite build .scratch/codex-mission-control/ui-prototype --outDir dist"
   },
   "devDependencies": {
     "vite": "^5.2.0"

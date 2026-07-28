@@ -1,4 +1,6 @@
 node_modules/
+codex-mission-control/dist/
+.scratch/codex-mission-control/ui-prototype/dist/
 *.log
 .DS_Store
 .agents/
