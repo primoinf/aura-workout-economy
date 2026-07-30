@@ -1,6 +1,6 @@
 # Task Board
 
-อัปเดตล่าสุด: 2026-07-28 18:50:21 +07:00
+อัปเดตล่าสุด: 2026-07-28 19:44:45 +07:00
 
 ย้ายงานระหว่างสามสถานะนี้เมื่อสถานะเปลี่ยน ทุกงานต้องอยู่เพียงสถานะเดียว และจะเป็น `DONE` ได้เมื่อ validation ผ่านหรือมีการระบุสิ่งที่ยังตรวจไม่ได้
 
@@ -20,6 +20,8 @@
 
 | ID | Task | Owner | Updated | Validation |
 | --- | --- | --- | --- | --- |
+| TASK-037 | Implement Codex Mission Control UI-01 shared shell + real-state A/B convergence | Codex | 2026-07-28 19:44:45 +07:00 | Production A Command Deck and B Mission Flow now consume replayed Mission projections; configured roles explicitly have unavailable telemetry; fail-closed history guard prevents hidden writes; 19/19 tests, syntax, build, 1440/390/320 browser journeys, full completion/reload replay, focus, overflow, console, and final two-axis re-review passed. Commit remains pending because the Git escalation was rejected before execution when Codex usage reached its limit. |
+| TASK-036 | Plan Codex Mission Control UI Convergence as Brief + Context + Workflow | Codex | 2026-07-28 19:16:07 +07:00 | Published a `ready-for-agent` focused PRD with the approved A/B/C mapping, 5 delivery waves, 35 user stories, one Mission Orchestrator seam, honest-data rules, dependencies, acceptance/test strategy, and scoped exclusions; required sections and `git diff --check` passed. |
 | TASK-035 | Implement Codex Mission Control Ticket 01: one persistent no-release Mission tracer bullet | Codex | 2026-07-28 18:50:21 +07:00 | Separate production app completed through the public Mission Orchestrator seam; 16/16 domain tests, syntax, Vite build, full desktop/mobile no-release journey, reload replay, focus, overflow, console, two-writer serialization, and final two-axis re-review passed. |
 | TASK-034 | Lock the hybrid UI decision and publish Codex Mission Control tracer-bullet tickets with blocking edges | Codex | 2026-07-28 14:48:25 +07:00 | Hybrid direction recorded in the PRD and prototype notes; root `tickets.md` contains seven `ready-for-agent` vertical slices, 55 acceptance criteria, and verified blocker targets; UTF-8 structure checks and `git diff --check` passed. |
 | TASK-033 | Build and visually validate a three-variant Codex Mission Control clickable UI prototype | Codex | 2026-07-28 14:35:16 +07:00 | Variants A/B/C, Overview/Mission/Approval views, and happy/review/rejected scenarios implemented with fake in-memory data; desktop 1440×960 and mobile 390×844 inspected; lifecycle interactions, evidence, approval, rejection, accessible navigation, URL switcher, syntax, prototype build, root build, and browser console passed. |

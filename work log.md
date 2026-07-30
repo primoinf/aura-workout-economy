@@ -2,6 +2,23 @@
 
 Timezone: Asia/Bangkok (`+07:00`)
 
+## 2026-07-28 19:44:45 +07:00
+
+- Implemented Codex Mission Control UI-01 in production: the shared shell and Overview now follow A's Command Deck hierarchy, while Mission Detail follows B's lifecycle-first Mission Flow hierarchy.
+- Added a tested presentation model for real Mission metrics, lifecycle completion, Evidence counts, replay signals, configured role directory, next allowed actions, and honest unavailable telemetry. No prototype scenarios, fake progress, live-agent claims, approval actions, or deployment behavior entered production.
+- Added a fail-closed Mission history guard. Malformed existing history renders a recovery surface, disables top-bar Mission creation, and independently rejects creation before append; its regression test proves no hidden Mission ID is stored.
+- Browser QA passed at 1440×960, 390×844, and 320px: A/B hierarchy, focus, Brief dialog, local lifecycle scrolling, no global overflow, consistent completed state, full nine-event no-release journey, reload replay, and zero console warnings/errors.
+- Syntax, 19/19 tests, Vite production build, and `git diff --check` passed. Standards and Spec re-review reported no remaining material finding. Residual gaps are documented in `hotcache.md`; no deployment was performed.
+- Git staging/commit was attempted only after validation, but the escalation was rejected before execution because Codex usage reached its limit. UI-01 therefore remains safely in the working tree and must be committed after usage resets.
+
+## 2026-07-28 19:16:07 +07:00
+
+- Used the `to-spec` flow to publish `.scratch/codex-mission-control-ui-convergence/PRD.md` as a focused `ready-for-agent` plan.
+- Locked the requested Brief + Context + Workflow: A is the real-state Command Deck Overview, B is the real-state Mission Flow Detail, and C activates as the Review Ledger only when Ticket 03 provides the approval domain.
+- Defined five delivery waves, a clear user workflow, one Mission Orchestrator behavioral seam, 35 user stories, honest configured-versus-live agent rules, dependencies on Tickets 02–04, test decisions, and out-of-scope boundaries.
+- Recommended UI-01 as the next implementation slice: shared shell plus A/B convergence before correction, approval, and live-agent features add more states.
+- Validation confirmed every required spec section, all 35 numbered user stories, and clean Markdown whitespace with `git diff --check`. No production code, commit, deployment, or unrelated workspace file was changed.
+
 ## 2026-07-28 18:50:21 +07:00
 
 - Implemented Codex Mission Control Ticket 01 as a separate production Vite app under `codex-mission-control/`, preserving Aura, Nihongo Dojo, and the throwaway prototypes. The approved hybrid UI is now Command Deck Overview plus Mission Flow Detail with a complete Brief and local-only no-release journey.

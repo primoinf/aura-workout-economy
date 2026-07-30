@@ -1,10 +1,17 @@
 import {
   MISSION_COMMAND_BY_ACTION,
-  MISSION_STATUS_ORDER,
   createBrowserWriteCoordinator,
   createLocalStorageEventStore,
   createMissionOrchestrator,
 } from "./mission-orchestrator.js";
+import {
+  deriveCommandDeckModel,
+  deriveMissionFlowModel,
+} from "./mission-presenter.js";
+import {
+  createMissionWhenHistoryReadable,
+  readMissionHistory,
+} from "./mission-history-guard.js";
 
 const orchestrator = createMissionOrchestrator({
   eventStore: createLocalStorageEventStore(),
@@ -12,21 +19,6 @@ const orchestrator = createMissionOrchestrator({
 });
 
 const app = document.querySelector("#app");
-const lifecycleLabels = {
-  BRIEF_ACCEPTED: "Brief",
-  CONTEXT_READY: "Context",
-  PLANNED: "Plan",
-  RUNNING: "Run",
-  IN_REVIEW: "Review",
-  VALIDATING: "Validation",
-  LEARNING: "Learning",
-  READY_TO_COMPLETE: "Accept",
-  COMPLETED: "Complete",
-};
-const lifecycle = MISSION_STATUS_ORDER.map((status) => [
-  status,
-  lifecycleLabels[status],
-]);
 
 const nextSteps = {
   capture_context: {
@@ -123,6 +115,7 @@ const nextSteps = {
 
 let activeMissionId = new URL(window.location.href).searchParams.get("mission");
 let notice = null;
+let historyReadError = null;
 
 function escapeHtml(value) {
   return String(value)
@@ -162,45 +155,47 @@ function focusCurrentView() {
 }
 
 function getMissions() {
-  return orchestrator.listMissions().sort((left, right) => {
-    const leftTime = left.events.at(-1)?.occurredAt ?? "";
-    const rightTime = right.events.at(-1)?.occurredAt ?? "";
-    return rightTime.localeCompare(leftTime);
-  });
+  const history = readMissionHistory(orchestrator);
+  historyReadError = history.error;
+  return history.missions;
 }
 
 function renderShell(content, view) {
   const missions = getMissions();
-  const completeCount = missions.filter(
-    (mission) => mission.status === "COMPLETED",
-  ).length;
-  const activeCount = missions.length - completeCount;
+  const commandDeck = deriveCommandDeckModel(missions);
 
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar" aria-label="Primary navigation">
         <button class="brand" type="button" data-route="overview" aria-label="Codex Mission Control home">
-          <span class="brand-mark" aria-hidden="true">C</span>
+          <span class="brand-mark" aria-hidden="true">⌁</span>
           <span>
-            <strong>Codex</strong>
-            <small>Mission Control</small>
+            <strong>Mission</strong>
+            <small>Control</small>
           </span>
         </button>
 
         <nav class="nav-list">
           <button class="nav-item ${view === "overview" ? "is-active" : ""}" type="button" data-route="overview" ${view === "overview" ? 'aria-current="page"' : ""}>
-            <span class="nav-icon" aria-hidden="true">⌘</span>
-            <span>Overview</span>
+            <span class="nav-icon" aria-hidden="true">▦</span>
+            <span>ภาพรวม</span>
           </button>
           <button class="nav-item ${view === "detail" ? "is-active" : ""}" type="button" data-route="detail" ${view === "detail" ? 'aria-current="page"' : ""} ${missions.length === 0 ? "disabled" : ""}>
-            <span class="nav-icon" aria-hidden="true">↗</span>
-            <span>Mission Detail</span>
+            <span class="nav-icon" aria-hidden="true">◎</span>
+            <span>Mission Flow</span>
+          </button>
+          <button class="nav-item" type="button" aria-disabled="true" title="Available after Ticket 03">
+            <span class="nav-icon" aria-hidden="true">◇</span>
+            <span class="nav-copy"><span>Approval Room</span><small>Ticket 03</small></span>
           </button>
         </nav>
 
-        <div class="sidebar-summary" aria-label="Local Mission summary">
-          <span><strong>${activeCount}</strong> active</span>
-          <span><strong>${completeCount}</strong> complete</span>
+        <div class="sidebar-team" aria-label="Configured Codex team">
+          <span class="sidebar-team-dot" aria-hidden="true"></span>
+          <div>
+            <strong>${commandDeck.metrics.configuredAgents} configured roles</strong>
+            <small>Telemetry unavailable · Ticket 04 pending</small>
+          </div>
         </div>
         <div class="local-mode">
           <span class="pulse-dot" aria-hidden="true"></span>
@@ -211,15 +206,15 @@ function renderShell(content, view) {
       <div class="workspace">
         <header class="topbar">
           <div class="mobile-brand">
-            <span class="brand-mark" aria-hidden="true">C</span>
+            <span class="brand-mark" aria-hidden="true">⌁</span>
             <span>Mission Control</span>
           </div>
           <div class="topbar-copy">
-            <span class="system-state"><span class="pulse-dot" aria-hidden="true"></span> Orchestrator online</span>
-            <span class="storage-state">Local event store · v1</span>
+            <span class="system-state"><span class="pulse-dot" aria-hidden="true"></span> Orchestrator ready</span>
+            <span class="storage-state">Brief → Context → Workflow → Evidence</span>
           </div>
-          <button class="new-mission-button" type="button" data-open-brief>
-            <span aria-hidden="true">＋</span> New Mission
+          <button class="new-mission-button" type="button" data-open-brief ${historyReadError ? 'disabled title="Mission creation is disabled until local history can be replayed"' : ""}>
+            <span aria-hidden="true">＋</span> สร้าง Mission
           </button>
         </header>
         ${notice ? `<div class="notice ${notice.kind}" role="status">${escapeHtml(notice.message)}</div>` : ""}
@@ -236,108 +231,170 @@ function renderShell(content, view) {
 
 function renderOverview() {
   const missions = getMissions();
-  const completed = missions.filter(
-    (mission) => mission.status === "COMPLETED",
-  ).length;
-  const active = missions.length - completed;
-  const totalEvents = missions.reduce(
-    (sum, mission) => sum + mission.events.length,
-    0,
-  );
+  const currentHistoryError = historyReadError;
+  const model = deriveCommandDeckModel(missions);
+
+  if (currentHistoryError) {
+    renderShell(renderHistoryError(currentHistoryError), "overview");
+    return;
+  }
 
   const missionCards =
-    missions.length === 0
+    model.missions.length === 0
       ? `
         <section class="empty-state" aria-labelledby="empty-title">
           <span class="empty-kicker">ZERO STATE</span>
-          <h2 id="empty-title">Give the team a bounded Mission.</h2>
-          <p>Create a complete Brief, then move it through an auditable local run. Ticket 01 never commits, pushes, or deploys.</p>
-          <button class="primary-button" type="button" data-open-brief>Create the first Mission</button>
+          <h2 id="empty-title">เริ่มจาก Brief ที่มีขอบเขตชัดเจน</h2>
+          <p>กำหนด Goal, Context, Acceptance criteria และ Authority ก่อนให้ Orchestrator สร้าง event แรก ระบบนี้ไม่ commit, push หรือ deploy เอง</p>
+          <button class="primary-button" type="button" data-open-brief>สร้าง Mission แรก</button>
         </section>
       `
-      : missions.map(renderMissionCard).join("");
+      : model.missions.map(renderMissionCard).join("");
+  const signals =
+    model.latestSignals.length === 0
+      ? `<div class="signal-empty">Event stream จะปรากฏหลัง Brief แรกถูกยอมรับ</div>`
+      : model.latestSignals.map(renderSignal).join("");
 
   renderShell(
     `
       <section class="page-heading command-heading">
         <div>
-          <p class="eyebrow">COMMAND DECK / LOCAL WORKSPACE</p>
-          <h1 id="page-title" tabindex="-1">Mission Overview</h1>
-          <p>One operational surface for bounded work, current gates, and durable evidence.</p>
+          <p class="eyebrow">CODEX TEAM / LIVE CONTROL</p>
+          <h1 id="page-title" tabindex="-1">ภาพรวมทีม</h1>
+          <p>Command Deck สำหรับติดตาม Mission, บทบาทที่ตั้งค่าไว้ และหลักฐานจริงจาก local event history</p>
         </div>
-        <div class="heading-meta">
-          <span>Capacity</span>
-          <strong>1 local run</strong>
+        <div class="heading-meta command-mode">
+          <span>Operating mode</span>
+          <strong>Local · No release</strong>
+          <small>Mission Orchestrator v1</small>
         </div>
       </section>
 
       <section class="metric-grid" aria-label="Mission metrics">
         <article class="metric-card accent-cyan">
-          <span>Active Missions</span>
-          <strong>${active}</strong>
-          <small>${active ? "Work remains in the current frontier" : "No work is currently running"}</small>
+          <span>Configured roles</span>
+          <strong>${model.metrics.configuredAgents}</strong>
+          <small>Agent telemetry unavailable until Ticket 04</small>
         </article>
         <article class="metric-card accent-green">
-          <span>Completed locally</span>
-          <strong>${completed}</strong>
-          <small>Accepted without release</small>
+          <span>Active Missions</span>
+          <strong>${model.metrics.activeMissions}</strong>
+          <small>${model.metrics.activeMissions ? "Work remains in the current frontier" : "No Mission is currently active"}</small>
         </article>
         <article class="metric-card accent-violet">
-          <span>Audit events</span>
-          <strong>${totalEvents}</strong>
-          <small>Replayed from local history</small>
+          <span>Completed locally</span>
+          <strong>${model.metrics.completedMissions}</strong>
+          <small>Accepted no-release outcomes</small>
         </article>
         <article class="metric-card accent-amber">
-          <span>External mutations</span>
-          <strong>0</strong>
-          <small>Release authority stays closed</small>
+          <span>Audit events</span>
+          <strong>${model.metrics.auditEvents}</strong>
+          <small>Immutable records replayed from this device</small>
         </article>
       </section>
 
       <section class="section-block">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">MISSION QUEUE</p>
-            <h2>Current Missions</h2>
+            <p class="eyebrow">CONFIGURED SQUAD</p>
+            <h2>ทีม Codex</h2>
           </div>
-          <span class="record-count">${missions.length} record${missions.length === 1 ? "" : "s"}</span>
+          <span class="honesty-note"><span></span> Configuration only · not live telemetry</span>
         </div>
-        <div class="mission-grid">${missionCards}</div>
+        <div class="team-grid">${model.team.map(renderTeamCard).join("")}</div>
       </section>
 
-      <section class="system-strip" aria-label="Ticket 01 system boundary">
-        <div><span class="strip-index">01</span><strong>Brief</strong><small>Human-owned authority</small></div>
+      <div class="overview-lower">
+        <section class="section-block mission-inventory" aria-labelledby="mission-queue-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">MISSION QUEUE</p>
+              <h2 id="mission-queue-title">Current Missions</h2>
+            </div>
+            <span class="record-count">${model.missions.length} record${model.missions.length === 1 ? "" : "s"}</span>
+          </div>
+          <div class="mission-grid">${missionCards}</div>
+        </section>
+
+        <section class="section-block signal-panel" aria-labelledby="signal-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">EVENT STREAM</p>
+              <h2 id="signal-title">Latest signals</h2>
+            </div>
+            <span class="live-label"><i></i>Replay</span>
+          </div>
+          <div class="signal-list">${signals}</div>
+        </section>
+      </div>
+
+      <section class="system-strip" aria-label="Mission information flow">
+        <div><span class="strip-index">01</span><strong>Brief</strong><small>Goal and authority</small></div>
         <span class="strip-arrow" aria-hidden="true">→</span>
-        <div><span class="strip-index">02</span><strong>Mission Orchestrator</strong><small>Single behavioral seam</small></div>
+        <div><span class="strip-index">02</span><strong>Context</strong><small>Versioned local snapshot</small></div>
         <span class="strip-arrow" aria-hidden="true">→</span>
-        <div><span class="strip-index">03</span><strong>Event history</strong><small>Immutable local replay</small></div>
+        <div><span class="strip-index">03</span><strong>Workflow</strong><small>Guarded lifecycle commands</small></div>
+        <span class="strip-arrow" aria-hidden="true">→</span>
+        <div><span class="strip-index">04</span><strong>Evidence</strong><small>Immutable audit events</small></div>
       </section>
     `,
     "overview",
   );
 }
 
+function renderTeamCard(role) {
+  return `
+    <article class="team-card tone-${escapeHtml(role.tone)}">
+      <div class="team-card-head">
+        <span class="team-avatar" aria-hidden="true">${escapeHtml(role.initials)}</span>
+        <div>
+          <h3>${escapeHtml(role.name)}</h3>
+          <p>${escapeHtml(role.role)}</p>
+        </div>
+        <span class="connection-dot" aria-hidden="true"></span>
+      </div>
+      <p class="team-capability">${escapeHtml(role.capability)}</p>
+      <div class="team-card-meta">
+        <span>${escapeHtml(role.permission)}</span>
+        <strong>${escapeHtml(role.connection)}</strong>
+      </div>
+      <div class="team-assignment">
+        <span>${escapeHtml(role.assignment)}</span>
+        <small>${escapeHtml(role.telemetry)}</small>
+      </div>
+    </article>
+  `;
+}
+
 function renderMissionCard(mission) {
-  const currentIndex = lifecycle.findIndex(([status]) => status === mission.status);
-  const progress = Math.round(((currentIndex + 1) / lifecycle.length) * 100);
-  const lastEvent = mission.events.at(-1);
   const isComplete = mission.status === "COMPLETED";
+  const nextActionLabel = mission.nextAction
+    ? nextSteps[mission.nextAction]?.label ?? humanize(mission.nextAction)
+    : "No action required";
 
   return `
     <article class="mission-card">
-      <button type="button" data-mission-id="${escapeHtml(mission.id)}" aria-label="Open Mission: ${escapeHtml(mission.brief.goal)}">
+      <button type="button" data-mission-id="${escapeHtml(mission.id)}" aria-label="Open Mission: ${escapeHtml(mission.goal)}">
         <div class="mission-card-top">
-          <span class="risk-badge risk-${escapeHtml(mission.brief.risk)}">${escapeHtml(mission.brief.risk)} risk</span>
+          <span class="risk-badge risk-${escapeHtml(mission.risk)}">${escapeHtml(mission.risk)} risk</span>
           <span class="status-badge ${isComplete ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
         </div>
-        <h3>${escapeHtml(mission.brief.goal)}</h3>
-        <p>${escapeHtml(mission.brief.scope)}</p>
-        <div class="progress-track" aria-label="${progress}% complete">
-          <span style="width: ${progress}%"></span>
+        <h3>${escapeHtml(mission.goal)}</h3>
+        <p>${escapeHtml(mission.scope)}</p>
+        <div class="progress-copy">
+          <span>Lifecycle completion</span>
+          <strong>${mission.lifecycleCompletion}%</strong>
+        </div>
+        <div class="progress-track" aria-label="${mission.lifecycleCompletion}% lifecycle completion">
+          <span style="width: ${mission.lifecycleCompletion}%"></span>
+        </div>
+        <div class="mission-next-action">
+          <span>Next allowed action</span>
+          <strong>${escapeHtml(nextActionLabel)}</strong>
         </div>
         <div class="mission-card-bottom">
-          <span>${mission.events.length} event${mission.events.length === 1 ? "" : "s"}</span>
-          <span>${escapeHtml(formatDate(lastEvent.occurredAt))}</span>
+          <span>${mission.eventCount} event${mission.eventCount === 1 ? "" : "s"}</span>
+          <span>${escapeHtml(formatDate(mission.latestEvent.occurredAt))}</span>
           <strong>Open flow <span aria-hidden="true">↗</span></strong>
         </div>
       </button>
@@ -345,25 +402,62 @@ function renderMissionCard(mission) {
   `;
 }
 
+function renderHistoryError(error) {
+  return `
+    <section class="history-error" role="alert" aria-labelledby="page-title">
+      <span class="history-error-mark" aria-hidden="true">!</span>
+      <p class="eyebrow">EVENT REPLAY FAILED CLOSED</p>
+      <h1 id="page-title" tabindex="-1">Mission history could not be replayed.</h1>
+      <p>The Command Deck is withholding derived status because the local event history is malformed or unreadable.</p>
+      <div class="history-error-detail">
+        <span>Detected problem</span>
+        <code>${escapeHtml(error?.message ?? "Unknown local event history error")}</code>
+      </div>
+      <p class="history-error-guidance">No Mission data was changed. Back up or repair <code>codex-mission-control-events-v1</code>, then reload this page.</p>
+    </section>
+  `;
+}
+
+function renderSignal(signal) {
+  return `
+    <article class="signal-item">
+      <span class="signal-sequence">${String(signal.sequence).padStart(2, "0")}</span>
+      <div>
+        <strong>${escapeHtml(humanize(signal.type))}</strong>
+        <p>${escapeHtml(signal.reason)}</p>
+        <small>${escapeHtml(signal.missionGoal)} · ${escapeHtml(signal.actor)}</small>
+      </div>
+      <time datetime="${escapeHtml(signal.occurredAt)}">${escapeHtml(formatDate(signal.occurredAt))}</time>
+    </article>
+  `;
+}
+
 function renderMissionDetail(mission) {
-  const currentIndex = lifecycle.findIndex(([status]) => status === mission.status);
-  const nextAction = mission.allowedActions[0];
+  const flow = deriveMissionFlowModel(mission);
+  const nextAction = flow.nextAction;
   const step = nextAction ? nextSteps[nextAction] : null;
   const latestEvent = mission.events.at(-1);
 
   renderShell(
     `
-      <section class="page-heading detail-heading">
-        <div>
+      <section class="mission-hero">
+        <div class="mission-hero-copy">
           <button class="back-link" type="button" data-route="overview">← Overview</button>
-          <p class="eyebrow">MISSION FLOW / ${escapeHtml(mission.id)}</p>
+          <p class="eyebrow">${escapeHtml(mission.id)} · EXECUTION FLOW</p>
           <h1 id="page-title" tabindex="-1">${escapeHtml(mission.brief.goal)}</h1>
           <p>${escapeHtml(mission.brief.scope)}</p>
+          <div class="mission-hero-meta">
+            <span class="status-badge ${mission.status === "COMPLETED" ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
+            <span>Context Pack v${mission.contextPackVersion}</span>
+            <span>${mission.events.length} events</span>
+            <span>${flow.evidenceCount} Evidence refs</span>
+          </div>
         </div>
-        <div class="detail-status">
-          <span>Current state</span>
-          <strong>${escapeHtml(humanize(mission.status))}</strong>
-          <small>Context Pack v${mission.contextPackVersion}</small>
+        <div class="completion-orbit" style="--completion: ${flow.lifecycleCompletion}%">
+          <div>
+            <strong>${flow.lifecycleCompletion}</strong><span>%</span>
+            <small>Lifecycle<br />completion</small>
+          </div>
         </div>
       </section>
 
@@ -373,27 +467,34 @@ function renderMissionDetail(mission) {
             <p class="eyebrow">ORDERED LIFECYCLE</p>
             <h2 id="flow-title">Mission Flow</h2>
           </div>
-          <span class="record-count">${currentIndex + 1} / ${lifecycle.length} stages</span>
+          <span class="record-count">${flow.currentStage.position} / ${flow.currentStage.total} stages</span>
         </div>
         <ol class="lifecycle-lane">
-          ${lifecycle
-            .map(([status, label], index) => {
-              const phase =
-                index < currentIndex
-                  ? "is-done"
-                  : index === currentIndex
-                    ? "is-current"
-                    : "is-next";
-              return `
-                <li class="${phase}">
-                  <span class="stage-dot">${index < currentIndex ? "✓" : String(index + 1).padStart(2, "0")}</span>
-                  <strong>${label}</strong>
-                  <small>${humanize(status)}</small>
+          ${flow.stages
+            .map(
+              (stage) => `
+                <li class="is-${stage.state}" ${stage.state === "current" ? 'aria-current="step"' : ""}>
+                  <span class="stage-dot">${stage.state === "done" ? "✓" : String(stage.number).padStart(2, "0")}</span>
+                  <strong>${escapeHtml(stage.label)}</strong>
+                  <small>${escapeHtml(humanize(stage.status))}</small>
                 </li>
-              `;
-            })
+              `,
+            )
             .join("")}
         </ol>
+      </section>
+
+      <section class="agent-lanes-panel" aria-labelledby="agent-lanes-title">
+        <div class="section-heading compact">
+          <div>
+            <p class="eyebrow">CONFIGURED HAND-OFFS</p>
+            <h2 id="agent-lanes-title">Agent lanes</h2>
+          </div>
+          <span class="honesty-note"><span></span> No live assignments</span>
+        </div>
+        <div class="agent-lanes">
+          ${flow.team.map(renderAgentLane).join("")}
+        </div>
       </section>
 
       <div class="detail-grid">
@@ -462,6 +563,21 @@ function renderMissionDetail(mission) {
     `,
     "detail",
   );
+}
+
+function renderAgentLane(role) {
+  return `
+    <article class="agent-lane tone-${escapeHtml(role.tone)}">
+      <span class="team-avatar" aria-hidden="true">${escapeHtml(role.initials)}</span>
+      <div class="agent-lane-copy">
+        <strong>${escapeHtml(role.name)}</strong>
+        <small>${escapeHtml(role.capability)}</small>
+      </div>
+      <div class="lane-track" aria-hidden="true"><span></span></div>
+      <span class="lane-state">${escapeHtml(role.assignment)}</span>
+      <span class="lane-connection">${escapeHtml(role.connection)}</span>
+    </article>
+  `;
 }
 
 function renderEvent(event) {
@@ -615,7 +731,7 @@ async function handleCreateMission(event) {
       .filter(Boolean);
 
   try {
-    const mission = await orchestrator.createMission({
+    const mission = await createMissionWhenHistoryReadable(orchestrator, {
       brief: {
         goal: String(form.get("goal")).trim(),
         scope: String(form.get("scope")).trim(),
@@ -667,6 +783,10 @@ async function advanceMission(action) {
 
 function render() {
   const missions = getMissions();
+  if (historyReadError) {
+    renderOverview();
+    return;
+  }
   const mission = activeMissionId
     ? missions.find((item) => item.id === activeMissionId)
     : null;
