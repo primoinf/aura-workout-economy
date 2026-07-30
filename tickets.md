@@ -57,19 +57,19 @@ Work the **frontier**: any ticket whose blockers are all done. Start each ticket
 
 ## 04 — Route one bounded assignment to a real Codex agent
 
-**Status:** ready-for-agent
+**Status:** done
 
 **What to build:** An orchestrator can route one bounded Assignment to the smallest capable configured Codex role, observe the live Run, and receive structured Artifact, Evidence, completion, or blocked output without granting broader mutation authority.
 
 **Blocked by:** 01 — Complete one no-release Mission locally.
 
-- [ ] Agent routing is behind an adapter and the core Mission lifecycle has no dependency on Codex Desktop transport details.
-- [ ] Routing uses declared role capability and risk rather than provider branding.
-- [ ] The Assignment declares goal, acceptance criteria, Context slice, ownership boundary, effective permission, budget, and expected Evidence.
-- [ ] Agent role, effective permission, observable model metadata, runtime status, and current Assignment are represented separately.
-- [ ] A completed Run attaches structured Artifacts and Evidence to the Mission; spawn success alone never marks work complete.
-- [ ] A blocked Run records the blocker, attempted alternatives, and authority or input required.
-- [ ] Adapter contract tests use a fake agent transport, and a bounded live smoke check proves one configured role can complete without touching unrelated files.
+- [x] Agent routing is behind an adapter and the core Mission lifecycle has no dependency on Codex Desktop transport details.
+- [x] Routing uses declared role capability and risk rather than provider branding.
+- [x] The Assignment declares goal, acceptance criteria, Context slice, ownership boundary, effective permission, budget, and expected Evidence.
+- [x] Agent role, effective permission, observable model metadata, runtime status, and current Assignment are represented separately.
+- [x] A completed Run attaches structured Artifacts and Evidence to the Mission; spawn success alone never marks work complete.
+- [x] A blocked Run records the blocker, attempted alternatives, and authority or input required.
+- [x] Adapter contract tests use a fake agent transport, and a bounded live smoke check proves one configured role can complete without touching unrelated files.
 
 ## 05 — Coordinate a multi-agent Mission in safe execution waves
 

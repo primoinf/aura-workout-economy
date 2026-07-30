@@ -1,37 +1,25 @@
 # Hot Cache
 
-Updated: 2026-07-28 19:44:45 +07:00 (Asia/Bangkok)
+Updated: 2026-07-30 16:07:17 +07:00 (Asia/Bangkok)
 
-## Codex Mission Control UI direction
+## Ticket 04 — bounded agent assignment
 
-- A focused `ready-for-agent` UI Convergence PRD now lives at `.scratch/codex-mission-control-ui-convergence/PRD.md`.
-- Approved mapping remains A = Command Deck Overview, B = Mission Flow Detail, C = Review Ledger Approval Room.
-- The prototype remains a visual contract only. Production must not inherit its scenario switcher, fake progress, fake metrics, fake agent activity, or fake approval.
-- UI-01 is complete: production now uses the A Command Deck and B Mission Flow hierarchy on real replayed state. Configured roles say telemetry is unavailable; Ticket 04 must supply Assignment/Run observations before live status appears.
-- Mission Orchestrator remains the single behavioral seam; UI must not introduce a second Mission store.
-- `mission-history-guard.js` fails closed on malformed history and blocks Mission creation before append; presenter and guard contracts are covered by black-box tests.
+- Ticket 04 is complete in `codex-mission-control/`. The Mission Orchestrator routes explicit, validated Assignments through an agent adapter without depending on Codex Desktop transport details.
+- Routing selects the smallest capable configured role from declared capability and risk. The Assignment bounds goal, acceptance criteria, Context slice, ownership, effective permission, budget, and expected Evidence.
+- Run replay now records routed, started, progress, completed, blocked, and error outcomes. Completion requires structured Artifacts and Evidence; blocked output preserves the blocker, attempted alternatives, and required authority.
+- Permission cannot exceed Brief mutation authority, ownership must remain beneath authorized roots, duplicate dispatch fails before append, malformed replay fails closed, and the first terminal observation stops the stream.
+- The UI separates role, effective permission, observable model metadata, runtime state, Assignment, elapsed time, and Evidence. A host may inject `globalThis.codexAgentTransport`; otherwise the app reports an honest disconnected state.
+- Validation passed: 32/32 tests, syntax checks, Vite production build, desktop 1440×960 and mobile 390×844 browser QA with no global overflow or console errors, and a bounded read-only `luna_worker` smoke with no touched files. Final Spec review found no actionable issue.
+- Implementation commits: `93449ed`, `37904ad`, and `a7f2e66`. Live evidence is recorded at `.scratch/codex-mission-control/ticket-04-live-smoke.md`.
 
-## Codex Mission Control production
+## Mission Control state
 
-- Ticket 01 is done in `codex-mission-control/`: a separate Vite app with Command Deck Overview, Mission Flow Detail, complete Brief form, local event persistence, replay, and an accepted no-release completion.
-- `src/mission-orchestrator.js` is the single behavioral seam. It validates Briefs, payloads, audit metadata, Evidence, event envelopes, sequence, Mission identity, Context version, legal replay order, and expected sequence.
-- Browser writes are serialized across tabs with Web Locks; release-required Briefs remain closed until Ticket 03.
-- Validation passed: 19/19 black-box tests, syntax, production build, desktop 1440×960, mobile 390×844 and 320px, full nine-stage journey, reload replay, focus management, local lifecycle scrolling, zero global overflow, and zero console warnings/errors.
-- Standards and Spec reviewers re-reviewed all UI-01 fixes and reported no material finding. Recorded gaps: UI journey coverage is browser/manual rather than a committed UI suite; corrupted history uses an in-memory execution test rather than real browser localStorage; cross-tab locking still uses a faithful lock mock.
-- UI-01 files remain unstaged/uncommitted: the Git escalation was rejected before execution because Codex usage reached its limit. Do not lose or overwrite this working-tree scope; stage and commit it after usage resets.
-- Run locally from `codex-mission-control/` with `npm.cmd run dev`.
-
-## Agent routing
-
-- Project routing is verified for `luna_worker`, `terra_builder`, `terra_debugger`, `sol_architect`, and read-only `sol_reviewer`.
-- Roles inherit the parent task model/reasoning; role diversity must not be presented as model diversity.
+- Ticket 01 and UI-01 are complete; UI-01 is committed as `6561da6`.
+- Ticket 02 correction/control loops are the next independent product slice. Ticket 05 is now blocked only by Ticket 02.
+- The browser host bridge remains optional and unavailable by default. The live smoke used the current Codex task runtime and is recorded separately rather than presented as browser telemetry.
 
 ## Workspace cautions
 
 - Nihongo Dojo remains separate and untouched by Mission Control work.
-- Preserve the pre-existing uncommitted `nihongo-dojo/app/globals.css` change.
+- Preserve unrelated user changes and the existing `nihongo-dojo/app/globals.css` change.
 - Do not deploy without an explicit request.
-
-## Next step
-
-- First commit the validated UI-01 working tree after usage resets. Then implement Ticket 02 correction/control loops; Ticket 04 real bounded agent assignment can proceed independently.

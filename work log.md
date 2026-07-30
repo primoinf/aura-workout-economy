@@ -2,6 +2,15 @@
 
 Timezone: Asia/Bangkok (`+07:00`)
 
+## 2026-07-30 16:07:17 +07:00
+
+- Completed Codex Mission Control Ticket 04: bounded Assignments now route through a transport-neutral adapter to the smallest capable configured role, with permission and ownership constrained by the Mission Brief.
+- Added shared Assignment validation, replayable Assignment/Run events, structured Artifact and Evidence completion, honest blocked/error outcomes, duplicate-dispatch protection, malformed-replay rejection, and terminal-stream cutoff.
+- Added host-injected `globalThis.codexAgentTransport` wiring and UI telemetry that keeps role, permission, model metadata, runtime, Assignment, elapsed time, and Evidence distinct; the default browser state remains explicitly disconnected.
+- TDD and review fixes cover permission escalation, path traversal, concurrent duplicate dispatch, incomplete replay, and repeated terminal observations. Code commits are `93449ed`, `37904ad`, and `a7f2e66`.
+- Validation passed: 32/32 tests, syntax checks, Vite build, desktop 1440×960 and mobile 390×844 browser QA with no global overflow or console errors, plus a bounded read-only `luna_worker` smoke with no touched files. Final Spec review reported no actionable finding.
+- Changed the routing adapter, Assignment validator, Mission Orchestrator, presenter, browser wiring/styles, black-box tests, live-smoke evidence, tickets, task board, and cache. No deployment was performed.
+
 ## 2026-07-28 19:44:45 +07:00
 
 - Implemented Codex Mission Control UI-01 in production: the shared shell and Overview now follow A's Command Deck hierarchy, while Mission Detail follows B's lifecycle-first Mission Flow hierarchy.
