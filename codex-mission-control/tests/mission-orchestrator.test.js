@@ -1157,3 +1157,73 @@ test("a second dispatch is rejected before it can append a duplicate Assignment"
     },
   );
 });
+
+test("post-terminal transport output cannot append a second terminal Run event", async () => {
+  const eventStore = createMemoryEventStore();
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        yield {
+          kind: "started",
+          runId: "run-terminal",
+          occurredAt: "2026-07-30T11:00:00.000Z",
+        };
+        for (const suffix of ["first", "duplicate"]) {
+          yield {
+            kind: "completed",
+            runId: "run-terminal",
+            occurredAt:
+              suffix === "first"
+                ? "2026-07-30T11:01:00.000Z"
+                : "2026-07-30T11:02:00.000Z",
+            summary: `${suffix} completion`,
+            artifacts: [
+              {
+                name: `${suffix}-artifact`,
+                uri: `artifact://${suffix}`,
+              },
+            ],
+            evidence: [
+              {
+                ref: `evidence://${suffix}`,
+                kind: "validation",
+                summary: `${suffix} Evidence`,
+              },
+            ],
+          };
+        }
+      },
+    },
+  });
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const mission = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for terminal stream protection",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  const completed = await orchestrator.dispatchAssignment(mission.id, {
+    assignment: boundedAssignment,
+    actor: "mission-owner",
+    reason: "Dispatch a transport with duplicate terminal output",
+  });
+  const replayed = createHarness(eventStore).getMission(mission.id);
+
+  assert.deepEqual(
+    {
+      status: completed.status,
+      terminalEvents: replayed.events.filter(
+        (event) => event.type === "AGENT_RUN_COMPLETED",
+      ).length,
+      artifactNames: replayed.artifacts.map((artifact) => artifact.name),
+      evidenceRefs: replayed.run.evidence.map((evidence) => evidence.ref),
+    },
+    {
+      status: "IN_REVIEW",
+      terminalEvents: 1,
+      artifactNames: ["first-artifact"],
+      evidenceRefs: ["evidence://first"],
+    },
+  );
+});

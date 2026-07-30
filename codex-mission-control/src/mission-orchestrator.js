@@ -845,6 +845,11 @@ export function createMissionOrchestrator({
               },
             });
           });
+          if (
+            ["RUN_COMPLETED", "RUN_BLOCKED"].includes(observation.type)
+          ) {
+            break;
+          }
         }
       } catch (error) {
         await writeCoordinator.runExclusive(() => {
