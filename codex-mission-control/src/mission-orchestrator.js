@@ -102,6 +102,15 @@ const EVENT_PROJECTIONS = Object.fromEntries(
   Object.values(COMMANDS).map((command) => [command.eventType, command]),
 );
 
+const AGENT_EVENT_TYPES = new Set([
+  "ASSIGNMENT_ROUTED",
+  "AGENT_RUN_STARTED",
+  "AGENT_RUN_UPDATED",
+  "AGENT_RUN_COMPLETED",
+  "AGENT_RUN_BLOCKED",
+  "AGENT_RUN_ERROR",
+]);
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -224,6 +233,178 @@ function assertEventEnvelope(
   seenEventIds.add(event.id);
 }
 
+function assertReplayObject(value, event, field) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires ${field}.`,
+    );
+  }
+}
+
+function assertReplayString(value, event, field) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} has invalid ${field}.`,
+    );
+  }
+}
+
+function projectAgentEvent(mission, event) {
+  if (event.type === "ASSIGNMENT_ROUTED") {
+    if (mission.status !== "PLANNED" || mission.assignment) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ASSIGNMENT_ROUTED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayObject(event.data.assignment, event, "assignment");
+    assertReplayObject(event.data.agent, event, "agent");
+    assertReplayString(event.data.assignment.id, event, "Assignment ID");
+    assertReplayString(event.data.assignment.goal, event, "Assignment goal");
+    assertReplayString(event.data.agent.roleId, event, "agent role");
+    assertReplayString(
+      event.data.agent.effectivePermission,
+      event,
+      "effective permission",
+    );
+    if (
+      event.data.assignment.effectivePermission !==
+      event.data.agent.effectivePermission
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: Assignment and agent effective permission do not match.`,
+      );
+    }
+    mission.assignment = clone(event.data.assignment);
+    mission.agent = clone(event.data.agent);
+    mission.allowedActions = [];
+    return;
+  }
+
+  if (!mission.assignment || !mission.agent) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires a routed Assignment.`,
+    );
+  }
+  assertReplayObject(event.data.run, event, "run");
+
+  if (event.type === "AGENT_RUN_STARTED") {
+    if (mission.status !== "PLANNED" || mission.run) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: AGENT_RUN_STARTED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayString(event.data.run.id, event, "Run ID");
+    if (event.data.run.status !== "WORKING") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: AGENT_RUN_STARTED must be WORKING.`,
+      );
+    }
+    mission.status = "RUNNING";
+    mission.run = clone(event.data.run);
+    mission.allowedActions = [];
+    return;
+  }
+
+  if (event.type === "AGENT_RUN_ERROR") {
+    if (
+      !["PLANNED", "RUNNING"].includes(mission.status) ||
+      event.data.run.status !== "ERROR" ||
+      typeof event.data.run.error !== "string" ||
+      event.data.run.error.trim() === "" ||
+      (mission.run && event.data.run.id !== mission.run.id)
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: Run error is invalid.`,
+      );
+    }
+    mission.run = clone(event.data.run);
+    mission.allowedActions = [];
+    return;
+  }
+
+  if (
+    mission.status !== "RUNNING" ||
+    !mission.run ||
+    event.data.run.id !== mission.run.id
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} does not match the active Run.`,
+    );
+  }
+
+  if (event.type === "AGENT_RUN_UPDATED") {
+    if (
+      mission.run.status !== "WORKING" ||
+      event.data.run.status !== "WORKING"
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: AGENT_RUN_UPDATED requires a working Run.`,
+      );
+    }
+    mission.run = clone(event.data.run);
+    mission.allowedActions = [];
+    return;
+  }
+
+  if (event.type === "AGENT_RUN_COMPLETED") {
+    if (mission.run.status !== "WORKING") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: completed Run is not active.`,
+      );
+    }
+    if (
+      event.data.run.status !== "COMPLETED" ||
+      !Array.isArray(event.data.artifacts) ||
+      event.data.artifacts.length === 0 ||
+      !Array.isArray(event.data.run.evidence) ||
+      event.data.run.evidence.length === 0 ||
+      event.evidenceRefs.length === 0
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: completed Run requires structured Artifacts and Evidence.`,
+      );
+    }
+    const evidenceRefs = event.data.run.evidence.map((item) => item.ref);
+    if (
+      evidenceRefs.some(
+        (reference) =>
+          typeof reference !== "string" || reference.trim() === "",
+      ) ||
+      evidenceRefs.length !== event.evidenceRefs.length ||
+      evidenceRefs.some(
+        (reference, index) => reference !== event.evidenceRefs[index],
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: completed Run Evidence references do not match.`,
+      );
+    }
+    mission.status = "IN_REVIEW";
+    mission.run = clone(event.data.run);
+    mission.artifacts = clone(event.data.artifacts);
+    mission.artifact = clone(event.data.artifacts[0]);
+    mission.allowedActions = [COMMAND_BY_STATUS.IN_REVIEW.action];
+    return;
+  }
+
+  if (event.type === "AGENT_RUN_BLOCKED") {
+    if (
+      event.data.run.status !== "BLOCKED" ||
+      typeof event.data.run.blocker !== "string" ||
+      !Array.isArray(event.data.run.attemptedAlternatives) ||
+      typeof event.data.run.requiredAuthorityOrInput !== "string"
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: blocked Run outcome is invalid.`,
+      );
+    }
+    mission.run = clone(event.data.run);
+    mission.allowedActions = [];
+    return;
+  }
+
+}
+
 function projectMission(events, expectedMissionId) {
   const created = events[0];
   const seenEventIds = new Set();
@@ -260,6 +441,15 @@ function projectMission(events, expectedMissionId) {
       expectedSequence: index + 2,
       seenEventIds,
     });
+    if (AGENT_EVENT_TYPES.has(event.type)) {
+      if (event.contextPackVersion !== mission.contextPackVersion) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: Context Pack version does not match.`,
+        );
+      }
+      projectAgentEvent(mission, event);
+      continue;
+    }
     const projection = EVENT_PROJECTIONS[event.type];
     if (!projection) {
       throw new Error(`Cannot replay unknown event: ${event.type}.`);
@@ -400,6 +590,7 @@ export function createBrowserWriteCoordinator({
 
 export function createMissionOrchestrator({
   eventStore,
+  agentRouter = null,
   clock = () => new Date().toISOString(),
   createId = (kind) => `${kind}-${crypto.randomUUID()}`,
   writeCoordinator = { runExclusive: (task) => task() },
@@ -410,6 +601,13 @@ export function createMissionOrchestrator({
   if (!writeCoordinator || typeof writeCoordinator.runExclusive !== "function") {
     throw new Error("A write coordinator is required.");
   }
+  if (
+    agentRouter &&
+    (typeof agentRouter.route !== "function" ||
+      typeof agentRouter.run !== "function")
+  ) {
+    throw new Error("The agent router must expose route() and run().");
+  }
 
   function getMission(missionId) {
     const events = eventStore.load(missionId);
@@ -417,6 +615,122 @@ export function createMissionOrchestrator({
       throw new Error(`Mission not found: ${missionId}.`);
     }
     return projectMission(events, missionId);
+  }
+
+  function appendAgentEvent(
+    missionId,
+    {
+      type,
+      actor,
+      reason,
+      occurredAt = clock(),
+      evidenceRefs = [],
+      data,
+      assertMission,
+    },
+  ) {
+    const mission = getMission(missionId);
+    assertAuditMetadata({ actor, reason });
+    assertMission?.(mission);
+    const event = {
+      id: createId("event"),
+      missionId,
+      sequence: mission.events.length + 1,
+      type,
+      actor,
+      occurredAt,
+      reason,
+      contextPackVersion: mission.contextPackVersion,
+      evidenceRefs: clone(evidenceRefs),
+      data: clone(data),
+    };
+    eventStore.append(missionId, [event], {
+      expectedSequence: mission.events.length,
+    });
+    return getMission(missionId);
+  }
+
+  function runFromObservation(mission, observation) {
+    const existingRun = mission.run;
+    if (observation.type === "RUN_STARTED") {
+      return {
+        id: observation.runId,
+        status: "WORKING",
+        startedAt: observation.occurredAt,
+        updatedAt: observation.occurredAt,
+        summary: null,
+        modelMetadata: clone(observation.modelMetadata ?? null),
+        evidence: [],
+      };
+    }
+    if (!existingRun || observation.runId !== existingRun.id) {
+      throw new Error("Agent observation does not match the active Run.");
+    }
+    if (observation.type === "RUN_UPDATED") {
+      return {
+        ...clone(existingRun),
+        status: "WORKING",
+        updatedAt: observation.occurredAt,
+        summary: observation.summary,
+      };
+    }
+    if (observation.type === "RUN_COMPLETED") {
+      return {
+        ...clone(existingRun),
+        status: "COMPLETED",
+        updatedAt: observation.occurredAt,
+        summary: observation.summary,
+        evidence: clone(observation.evidence),
+      };
+    }
+    if (observation.type === "RUN_BLOCKED") {
+      return {
+        ...clone(existingRun),
+        status: "BLOCKED",
+        updatedAt: observation.occurredAt,
+        blocker: observation.blocker,
+        attemptedAlternatives: clone(observation.attemptedAlternatives),
+        requiredAuthorityOrInput: observation.requiredAuthorityOrInput,
+      };
+    }
+    throw new Error(`Unsupported agent observation: ${observation.type}.`);
+  }
+
+  function assertAssignmentWithinMissionAuthority(mission, routing) {
+    if (routing.agent.effectivePermission !== "workspace-write") {
+      return;
+    }
+    const authority = mission.brief.mutationAuthority;
+    const prefix = "workspace-write:";
+    if (
+      typeof authority !== "string" ||
+      !authority.toLowerCase().startsWith(prefix)
+    ) {
+      throw new Error(
+        "Assignment workspace-write permission exceeds Mission mutation authority.",
+      );
+    }
+    const authorizedRoots = authority
+      .slice(prefix.length)
+      .split(",")
+      .map((path) => path.trim().replaceAll("\\", "/").replace(/\/+$/, ""))
+      .filter(Boolean);
+    const writePaths = routing.assignment.ownershipBoundary.writePaths.map(
+      (path) => path.replaceAll("\\", "/").replace(/\/+$/, ""),
+    );
+    if (
+      authorizedRoots.length === 0 ||
+      writePaths.some(
+        (path) =>
+          !authorizedRoots.some(
+            (root) => path === root || path.startsWith(`${root}/`),
+          ),
+      )
+    ) {
+      throw new Error(
+        "Assignment writable ownership exceeds Mission mutation authority.",
+      );
+    }
   }
 
   return {
@@ -452,6 +766,109 @@ export function createMissionOrchestrator({
         );
     },
     getMission,
+    async dispatchAssignment(missionId, input) {
+      if (!agentRouter) {
+        throw new Error("Agent routing is not connected.");
+      }
+      const { assignment, actor, reason } = input;
+      assertAuditMetadata({ actor, reason });
+      const routing = agentRouter.route(assignment);
+
+      await writeCoordinator.runExclusive(() =>
+        appendAgentEvent(missionId, {
+          type: "ASSIGNMENT_ROUTED",
+          actor,
+          reason,
+          data: {
+            assignment: routing.assignment,
+            agent: routing.agent,
+          },
+          assertMission(mission) {
+            if (mission.status !== "PLANNED") {
+              throw new Error(
+                `Assignment routing is not allowed while Mission is ${mission.status}.`,
+              );
+            }
+            assertAssignmentWithinMissionAuthority(mission, routing);
+          },
+        }),
+      );
+
+      try {
+        for await (const observation of agentRouter.run(routing)) {
+          await writeCoordinator.runExclusive(() => {
+            const mission = getMission(missionId);
+            const run = runFromObservation(mission, observation);
+            const eventType = `AGENT_${observation.type}`;
+            const eventReason =
+              observation.summary ??
+              observation.blocker ??
+              `Started Assignment ${routing.assignment.id}`;
+            const evidenceRefs =
+              observation.type === "RUN_COMPLETED"
+                ? observation.evidence.map((item) => item.ref)
+                : [];
+
+            return appendAgentEvent(missionId, {
+              type: eventType,
+              actor: `agent:${routing.agent.roleId}`,
+              reason: eventReason,
+              occurredAt: observation.occurredAt,
+              evidenceRefs,
+              data: {
+                run,
+                ...(observation.type === "RUN_COMPLETED"
+                  ? { artifacts: observation.artifacts }
+                  : {}),
+              },
+            });
+          });
+        }
+      } catch (error) {
+        await writeCoordinator.runExclusive(() => {
+          const mission = getMission(missionId);
+          const run = {
+            ...(mission.run ? clone(mission.run) : {}),
+            id: mission.run?.id ?? `unavailable:${routing.assignment.id}`,
+            status: "ERROR",
+            updatedAt: clock(),
+            error: error.message,
+          };
+          return appendAgentEvent(missionId, {
+            type: "AGENT_RUN_ERROR",
+            actor: "agent-router",
+            reason: error.message,
+            data: { run },
+          });
+        });
+        throw error;
+      }
+
+      const mission = getMission(missionId);
+      if (!["COMPLETED", "BLOCKED"].includes(mission.run?.status)) {
+        const error = new Error(
+          "Agent transport ended without a completed or blocked Run outcome.",
+        );
+        await writeCoordinator.runExclusive(() =>
+          appendAgentEvent(missionId, {
+            type: "AGENT_RUN_ERROR",
+            actor: "agent-router",
+            reason: error.message,
+            data: {
+              run: {
+                ...(mission.run ? clone(mission.run) : {}),
+                id: mission.run?.id ?? `unavailable:${routing.assignment.id}`,
+                status: "ERROR",
+                updatedAt: clock(),
+                error: error.message,
+              },
+            },
+          }),
+        );
+        throw error;
+      }
+      return mission;
+    },
     execute(missionId, input) {
       return writeCoordinator.runExclusive(() => {
         const {

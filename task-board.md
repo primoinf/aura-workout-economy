@@ -1,6 +1,6 @@
 # Task Board
 
-อัปเดตล่าสุด: 2026-07-28 19:44:45 +07:00
+อัปเดตล่าสุด: 2026-07-30 15:30:26 +07:00
 
 ย้ายงานระหว่างสามสถานะนี้เมื่อสถานะเปลี่ยน ทุกงานต้องอยู่เพียงสถานะเดียว และจะเป็น `DONE` ได้เมื่อ validation ผ่านหรือมีการระบุสิ่งที่ยังตรวจไม่ได้
 
@@ -13,6 +13,7 @@
 
 | ID | งาน | ผู้รับผิดชอบ | อัปเดตล่าสุด | หมายเหตุ |
 | --- | --- | --- | --- | --- |
+| TASK-038 | Implement Codex Mission Control Ticket 04: route one bounded Assignment to a real Codex agent | Codex | 2026-07-30 15:30:26 +07:00 | TDD at the Mission Orchestrator and agent-routing adapter seams; live bounded smoke and final review pending. |
 
 ## DONE
 

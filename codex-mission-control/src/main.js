@@ -191,10 +191,10 @@ function renderShell(content, view) {
         </nav>
 
         <div class="sidebar-team" aria-label="Configured Codex team">
-          <span class="sidebar-team-dot" aria-hidden="true"></span>
+          <span class="sidebar-team-dot ${commandDeck.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}" aria-hidden="true"></span>
           <div>
             <strong>${commandDeck.metrics.configuredAgents} configured roles</strong>
-            <small>Telemetry unavailable · Ticket 04 pending</small>
+            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : "Agent transport disconnected"}</small>
           </div>
         </div>
         <div class="local-mode">
@@ -274,7 +274,7 @@ function renderOverview() {
         <article class="metric-card accent-cyan">
           <span>Configured roles</span>
           <strong>${model.metrics.configuredAgents}</strong>
-          <small>Agent telemetry unavailable until Ticket 04</small>
+          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : "No Assignment / Run observations"}</small>
         </article>
         <article class="metric-card accent-green">
           <span>Active Missions</span>
@@ -299,7 +299,7 @@ function renderOverview() {
             <p class="eyebrow">CONFIGURED SQUAD</p>
             <h2>ทีม Codex</h2>
           </div>
-          <span class="honesty-note"><span></span> Configuration only · not live telemetry</span>
+          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : "Configuration only · transport disconnected"}</span>
         </div>
         <div class="team-grid">${model.team.map(renderTeamCard).join("")}</div>
       </section>
@@ -343,8 +343,13 @@ function renderOverview() {
 }
 
 function renderTeamCard(role) {
+  const runtimeClass = role.runtimeStatus.toLowerCase();
+  const effectivePermission = role.effectivePermission ?? role.permission;
+  const modelMetadata = role.modelMetadata
+    ? `${role.modelMetadata.name}${role.modelMetadata.reasoningEffort ? ` · ${role.modelMetadata.reasoningEffort}` : ""}`
+    : "Model metadata unavailable";
   return `
-    <article class="team-card tone-${escapeHtml(role.tone)}">
+    <article class="team-card tone-${escapeHtml(role.tone)} runtime-${escapeHtml(runtimeClass)}">
       <div class="team-card-head">
         <span class="team-avatar" aria-hidden="true">${escapeHtml(role.initials)}</span>
         <div>
@@ -355,12 +360,16 @@ function renderTeamCard(role) {
       </div>
       <p class="team-capability">${escapeHtml(role.capability)}</p>
       <div class="team-card-meta">
-        <span>${escapeHtml(role.permission)}</span>
+        <span>${escapeHtml(effectivePermission)}</span>
         <strong>${escapeHtml(role.connection)}</strong>
       </div>
       <div class="team-assignment">
         <span>${escapeHtml(role.assignment)}</span>
         <small>${escapeHtml(role.telemetry)}</small>
+      </div>
+      <div class="team-observation">
+        <span>${escapeHtml(modelMetadata)}</span>
+        <small>${escapeHtml(role.latestEvidence ?? "No observed Evidence")}</small>
       </div>
     </article>
   `;
@@ -490,7 +499,7 @@ function renderMissionDetail(mission) {
             <p class="eyebrow">CONFIGURED HAND-OFFS</p>
             <h2 id="agent-lanes-title">Agent lanes</h2>
           </div>
-          <span class="honesty-note"><span></span> No live assignments</span>
+          <span class="honesty-note ${mission.agent ? "is-observed" : ""}"><span></span> ${mission.agent ? "Replayed Assignment / Run observations" : "No Assignment / Run observations"}</span>
         </div>
         <div class="agent-lanes">
           ${flow.team.map(renderAgentLane).join("")}
@@ -566,16 +575,17 @@ function renderMissionDetail(mission) {
 }
 
 function renderAgentLane(role) {
+  const runtimeClass = role.runtimeStatus.toLowerCase();
   return `
-    <article class="agent-lane tone-${escapeHtml(role.tone)}">
+    <article class="agent-lane tone-${escapeHtml(role.tone)} runtime-${escapeHtml(runtimeClass)}">
       <span class="team-avatar" aria-hidden="true">${escapeHtml(role.initials)}</span>
       <div class="agent-lane-copy">
         <strong>${escapeHtml(role.name)}</strong>
-        <small>${escapeHtml(role.capability)}</small>
+        <small>${escapeHtml(role.effectivePermission ?? role.permission)} · ${escapeHtml(role.capability)}</small>
       </div>
       <div class="lane-track" aria-hidden="true"><span></span></div>
       <span class="lane-state">${escapeHtml(role.assignment)}</span>
-      <span class="lane-connection">${escapeHtml(role.connection)}</span>
+      <span class="lane-connection">${escapeHtml(role.runtimeStatus === "DISCONNECTED" ? role.connection : `${role.runtimeStatus}${role.elapsedTime ? ` · ${role.elapsedTime}` : ""}`)}</span>
     </article>
   `;
 }

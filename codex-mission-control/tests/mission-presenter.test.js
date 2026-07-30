@@ -225,3 +225,170 @@ test("Mission Flow derives lifecycle completion and evidence counts without inve
     },
   );
 });
+
+test("team telemetry is derived only from observable Assignment and Run state", () => {
+  const observedMission = {
+    id: "mission-observed",
+    brief,
+    status: "IN_REVIEW",
+    contextPackVersion: 1,
+    allowedActions: ["pass_review"],
+    assignment: {
+      id: "assignment-001",
+      goal: "Inventory Mission event types",
+    },
+    agent: {
+      roleId: "luna_worker",
+      roleName: "Luna Worker",
+      capability: "deterministic",
+      effectivePermission: "read-only",
+    },
+    run: {
+      id: "run-001",
+      status: "COMPLETED",
+      startedAt: "2026-07-30T08:00:00.000Z",
+      updatedAt: "2026-07-30T08:02:00.000Z",
+      modelMetadata: {
+        name: "observable-model",
+        reasoningEffort: "medium",
+      },
+      evidence: [
+        {
+          ref: "evidence://event-inventory",
+          kind: "inspection",
+          summary: "Sorted event names from the bounded source",
+        },
+      ],
+    },
+    events: [
+      {
+        ...event(1, "MISSION_CREATED", "2026-07-30T07:58:00.000Z"),
+        missionId: "mission-observed",
+      },
+      {
+        ...event(2, "ASSIGNMENT_ROUTED", "2026-07-30T07:59:00.000Z"),
+        missionId: "mission-observed",
+      },
+      {
+        ...event(
+          3,
+          "AGENT_RUN_COMPLETED",
+          "2026-07-30T08:02:00.000Z",
+          ["evidence://event-inventory"],
+        ),
+        missionId: "mission-observed",
+      },
+    ],
+  };
+
+  const overview = deriveCommandDeckModel([observedMission]);
+  const flow = deriveMissionFlowModel(observedMission);
+  const overviewLuna = overview.team.find(
+    (role) => role.id === "luna_worker",
+  );
+  const flowLuna = flow.team.find((role) => role.id === "luna_worker");
+  const terra = overview.team.find((role) => role.id === "terra_builder");
+  const expectedLuna = {
+    id: "luna_worker",
+    initials: "LU",
+    name: "Luna Worker",
+    role: "Operations",
+    capability: "Deterministic search, extraction, and checks",
+    permission: "Bounded worker",
+    tone: "violet",
+    connection: "Observed",
+    assignment: "Inventory Mission event types",
+    telemetry: "Completed · 2m",
+    runtimeStatus: "COMPLETED",
+    effectivePermission: "read-only",
+    modelMetadata: {
+      name: "observable-model",
+      reasoningEffort: "medium",
+    },
+    elapsedTime: "2m",
+    latestEvidence: "evidence://event-inventory",
+    missionId: "mission-observed",
+  };
+
+  assert.deepEqual(
+    {
+      agentTelemetry: overview.metrics.agentTelemetry,
+      overviewLuna,
+      flowLuna,
+      disconnectedTerra: {
+        connection: terra.connection,
+        runtimeStatus: terra.runtimeStatus,
+        assignment: terra.assignment,
+        modelMetadata: terra.modelMetadata,
+      },
+    },
+    {
+      agentTelemetry: "Observed",
+      overviewLuna: expectedLuna,
+      flowLuna: expectedLuna,
+      disconnectedTerra: {
+        connection: "Not connected",
+        runtimeStatus: "DISCONNECTED",
+        assignment: "No assignment",
+        modelMetadata: null,
+      },
+    },
+  );
+});
+
+test("team telemetry exposes an observed transport error as error, not working", () => {
+  const failedMission = {
+    id: "mission-error",
+    brief,
+    status: "PLANNED",
+    contextPackVersion: 1,
+    allowedActions: [],
+    assignment: {
+      id: "assignment-error",
+      goal: "Run a bounded inspection",
+    },
+    agent: {
+      roleId: "luna_worker",
+      roleName: "Luna Worker",
+      capability: "deterministic",
+      effectivePermission: "read-only",
+    },
+    run: {
+      id: "unavailable:assignment-error",
+      status: "ERROR",
+      updatedAt: "2026-07-30T08:00:00.000Z",
+      error: "Codex agent transport is unavailable",
+    },
+    events: [
+      {
+        ...event(1, "MISSION_CREATED", "2026-07-30T07:58:00.000Z"),
+        missionId: "mission-error",
+      },
+      {
+        ...event(2, "AGENT_RUN_ERROR", "2026-07-30T08:00:00.000Z"),
+        missionId: "mission-error",
+      },
+    ],
+  };
+
+  const luna = deriveCommandDeckModel([failedMission]).team.find(
+    (role) => role.id === "luna_worker",
+  );
+
+  assert.deepEqual(
+    {
+      connection: luna.connection,
+      runtimeStatus: luna.runtimeStatus,
+      telemetry: luna.telemetry,
+      assignment: luna.assignment,
+      elapsedTime: luna.elapsedTime,
+    },
+    {
+      connection: "Error",
+      runtimeStatus: "ERROR",
+      telemetry: "Error",
+      assignment: "Run a bounded inspection",
+      elapsedTime: null,
+    },
+  );
+});

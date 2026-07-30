@@ -14,6 +14,7 @@ export const LIFECYCLE_LABELS = Object.freeze({
 
 export const TEAM_ROLE_DIRECTORY = Object.freeze([
   Object.freeze({
+    id: "orchestrator",
     initials: "OR",
     name: "Orchestrator",
     role: "Team Lead",
@@ -22,6 +23,7 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
     tone: "cyan",
   }),
   Object.freeze({
+    id: "luna_worker",
     initials: "LU",
     name: "Luna Worker",
     role: "Operations",
@@ -30,6 +32,7 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
     tone: "violet",
   }),
   Object.freeze({
+    id: "terra_builder",
     initials: "TB",
     name: "Terra Builder",
     role: "Build Team",
@@ -38,6 +41,7 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
     tone: "emerald",
   }),
   Object.freeze({
+    id: "terra_debugger",
     initials: "TD",
     name: "Terra Debugger",
     role: "Incident Team",
@@ -46,6 +50,7 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
     tone: "amber",
   }),
   Object.freeze({
+    id: "sol_architect",
     initials: "SA",
     name: "Sol Architect",
     role: "Architecture Board",
@@ -54,6 +59,7 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
     tone: "blue",
   }),
   Object.freeze({
+    id: "sol_reviewer",
     initials: "SR",
     name: "Sol Reviewer",
     role: "Quality Board",
@@ -93,6 +99,97 @@ function toMissionSummary(mission) {
   });
 }
 
+function elapsedTime(run) {
+  if (!run?.startedAt || !run?.updatedAt) {
+    return null;
+  }
+  const elapsedMilliseconds =
+    Date.parse(run.updatedAt) - Date.parse(run.startedAt);
+  if (!Number.isFinite(elapsedMilliseconds) || elapsedMilliseconds < 0) {
+    return null;
+  }
+  const elapsedMinutes = Math.floor(elapsedMilliseconds / 60_000);
+  if (elapsedMinutes < 1) {
+    return "<1m";
+  }
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m`;
+  }
+  const hours = Math.floor(elapsedMinutes / 60);
+  const minutes = elapsedMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+function runtimeLabel(status) {
+  return (
+    {
+      ASSIGNED: "Assigned",
+      WORKING: "Working",
+      COMPLETED: "Completed",
+      BLOCKED: "Blocked",
+      ERROR: "Error",
+    }[status] ?? status
+  );
+}
+
+function deriveTeamModel(missions) {
+  const latestObservationByRole = new Map();
+  const orderedMissions = [...missions].sort((left, right) =>
+    latestEventTime(right).localeCompare(latestEventTime(left)),
+  );
+  for (const mission of orderedMissions) {
+    const roleId = mission.agent?.roleId;
+    if (roleId && !latestObservationByRole.has(roleId)) {
+      latestObservationByRole.set(roleId, mission);
+    }
+  }
+
+  return Object.freeze(
+    TEAM_ROLE_DIRECTORY.map((role) => {
+      const mission = latestObservationByRole.get(role.id);
+      if (!mission) {
+        return Object.freeze({
+          ...role,
+          connection: "Not connected",
+          assignment: "No assignment",
+          telemetry: "No runtime observation",
+          runtimeStatus: "DISCONNECTED",
+          effectivePermission: null,
+          modelMetadata: null,
+          elapsedTime: null,
+          latestEvidence: null,
+          missionId: null,
+        });
+      }
+
+      const run = mission.run;
+      const runtimeStatus = run?.status ?? "ASSIGNED";
+      const elapsed = elapsedTime(run);
+      const modelMetadata = run?.modelMetadata
+        ? Object.freeze(structuredClone(run.modelMetadata))
+        : null;
+      const latestEvidence =
+        run?.evidence?.at(-1)?.ref ??
+        mission.events
+          .flatMap((event) => event.evidenceRefs)
+          .at(-1) ??
+        null;
+      return Object.freeze({
+        ...role,
+        connection: runtimeStatus === "ERROR" ? "Error" : "Observed",
+        assignment: mission.assignment.goal,
+        telemetry: `${runtimeLabel(runtimeStatus)}${elapsed ? ` · ${elapsed}` : ""}`,
+        runtimeStatus,
+        effectivePermission: mission.agent.effectivePermission,
+        modelMetadata,
+        elapsedTime: elapsed,
+        latestEvidence,
+        missionId: mission.id,
+      });
+    }),
+  );
+}
+
 export function deriveCommandDeckModel(missions) {
   const orderedMissions = [...missions].sort((left, right) =>
     latestEventTime(right).localeCompare(latestEventTime(left)),
@@ -125,19 +222,12 @@ export function deriveCommandDeckModel(missions) {
         0,
       ),
       configuredAgents: TEAM_ROLE_DIRECTORY.length,
-      agentTelemetry: "Unavailable",
+      agentTelemetry: orderedMissions.some((mission) => mission.agent)
+        ? "Observed"
+        : "Unavailable",
     }),
     missions: Object.freeze(orderedMissions.map(toMissionSummary)),
-    team: Object.freeze(
-      TEAM_ROLE_DIRECTORY.map((role) =>
-        Object.freeze({
-          ...role,
-          connection: "Not connected",
-          assignment: "No assignment",
-          telemetry: "Available after Ticket 04",
-        }),
-      ),
-    ),
+    team: deriveTeamModel(orderedMissions),
     latestSignals: Object.freeze(latestSignals.map(Object.freeze)),
   });
 }
@@ -174,14 +264,6 @@ export function deriveMissionFlowModel(mission) {
     nextAction: mission.allowedActions[0] ?? null,
     evidenceCount: evidenceRefs.size,
     stages: Object.freeze(stages),
-    team: Object.freeze(
-      TEAM_ROLE_DIRECTORY.map((role) =>
-        Object.freeze({
-          ...role,
-          connection: "Not connected",
-          assignment: "No assignment",
-        }),
-      ),
-    ),
+    team: deriveTeamModel([mission]),
   });
 }

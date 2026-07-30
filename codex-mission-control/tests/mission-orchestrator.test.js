@@ -7,6 +7,7 @@ import {
   createBrowserWriteCoordinator,
   createMissionOrchestrator,
 } from "../src/mission-orchestrator.js";
+import { createAgentRoutingAdapter } from "../src/agent-routing-adapter.js";
 
 const validBrief = {
   goal: "Ship a persistent no-release Mission tracer bullet",
@@ -22,14 +23,60 @@ const validBrief = {
   releaseAuthority: "mission-owner",
 };
 
-function createHarness(eventStore = createMemoryEventStore()) {
+const boundedAssignment = {
+  id: "assignment-001",
+  goal: "Inventory Mission event types",
+  acceptanceCriteria: ["Return every event type exactly once"],
+  contextSlice: {
+    summary: "Inspect only the Mission Orchestrator source",
+    sourceRefs: ["src/mission-orchestrator.js"],
+  },
+  ownershipBoundary: {
+    readPaths: ["src/mission-orchestrator.js"],
+    writePaths: [],
+  },
+  effectivePermission: "read-only",
+  budget: {
+    maxTurns: 2,
+    maxMinutes: 5,
+  },
+  expectedEvidence: ["A sorted event type inventory"],
+  workKind: "deterministic",
+  risk: "low",
+};
+
+function createHarness(
+  eventStore = createMemoryEventStore(),
+  agentRouter = undefined,
+) {
   let eventNumber = 0;
 
   return createMissionOrchestrator({
     eventStore,
+    agentRouter,
     clock: () => "2026-07-28T08:00:00.000Z",
     createId: (kind) =>
       kind === "mission" ? "mission-001" : `event-${++eventNumber}`,
+  });
+}
+
+function advanceToPlanned(orchestrator, missionId) {
+  orchestrator.execute(missionId, {
+    type: "CAPTURE_CONTEXT",
+    payload: {
+      context: {
+        summary: "Bounded source inspection",
+        sourceRefs: ["src/mission-orchestrator.js"],
+      },
+    },
+    actor: "mission-owner",
+    reason: "Capture the Context slice",
+  });
+  return orchestrator.execute(missionId, {
+    type: "ACCEPT_PLAN",
+    payload: { plan: { steps: ["route one bounded Assignment"] } },
+    actor: "mission-owner",
+    reason: "Accept the bounded routing plan",
   });
 }
 
@@ -700,6 +747,295 @@ test("browser write coordinator serializes two Orchestrators racing for one sequ
         "CAPTURE_CONTEXT is not allowed while Mission is CONTEXT_READY.",
       missionStatus: "CONTEXT_READY",
       eventCount: 2,
+    },
+  );
+});
+
+test("Mission Orchestrator routes one bounded Assignment and attaches completed Run output", async () => {
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        yield {
+          kind: "started",
+          runId: "run-001",
+          occurredAt: "2026-07-30T08:00:00.000Z",
+          model: { name: "observable-model", reasoningEffort: "medium" },
+        };
+        yield {
+          kind: "progress",
+          runId: "run-001",
+          occurredAt: "2026-07-30T08:01:00.000Z",
+          summary: "Inspected the bounded source file",
+        };
+        yield {
+          kind: "completed",
+          runId: "run-001",
+          occurredAt: "2026-07-30T08:02:00.000Z",
+          summary: "Returned the requested event inventory",
+          artifacts: [
+            {
+              name: "event-inventory",
+              uri: "artifact://event-inventory",
+            },
+          ],
+          evidence: [
+            {
+              ref: "evidence://event-inventory",
+              kind: "inspection",
+              summary: "Sorted event names from the bounded source",
+            },
+          ],
+        };
+      },
+    },
+  });
+  const orchestrator = createHarness(createMemoryEventStore(), agentRouter);
+  const mission = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for a real bounded Assignment",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  const completedRun = await orchestrator.dispatchAssignment(mission.id, {
+    assignment: boundedAssignment,
+    actor: "mission-owner",
+    reason: "Route deterministic work to the smallest capable role",
+  });
+
+  assert.deepEqual(
+    {
+      missionStatus: completedRun.status,
+      assignment: completedRun.assignment,
+      agent: completedRun.agent,
+      run: completedRun.run,
+      artifacts: completedRun.artifacts,
+      eventTypes: completedRun.events.map((event) => event.type),
+      completionEvidenceRefs: completedRun.events.at(-1).evidenceRefs,
+      allowedActions: completedRun.allowedActions,
+    },
+    {
+      missionStatus: "IN_REVIEW",
+      assignment: boundedAssignment,
+      agent: {
+        roleId: "luna_worker",
+        roleName: "Luna Worker",
+        capability: "deterministic",
+        effectivePermission: "read-only",
+      },
+      run: {
+        id: "run-001",
+        status: "COMPLETED",
+        startedAt: "2026-07-30T08:00:00.000Z",
+        updatedAt: "2026-07-30T08:02:00.000Z",
+        summary: "Returned the requested event inventory",
+        modelMetadata: {
+          name: "observable-model",
+          reasoningEffort: "medium",
+        },
+        evidence: [
+          {
+            ref: "evidence://event-inventory",
+            kind: "inspection",
+            summary: "Sorted event names from the bounded source",
+          },
+        ],
+      },
+      artifacts: [
+        {
+          name: "event-inventory",
+          uri: "artifact://event-inventory",
+        },
+      ],
+      eventTypes: [
+        "MISSION_CREATED",
+        "CONTEXT_CAPTURED",
+        "PLAN_ACCEPTED",
+        "ASSIGNMENT_ROUTED",
+        "AGENT_RUN_STARTED",
+        "AGENT_RUN_UPDATED",
+        "AGENT_RUN_COMPLETED",
+      ],
+      completionEvidenceRefs: ["evidence://event-inventory"],
+      allowedActions: ["pass_review"],
+    },
+  );
+});
+
+test("blocked Run preserves the blocker, attempted alternatives, and required authority", async () => {
+  const eventStore = createMemoryEventStore();
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        yield {
+          kind: "started",
+          runId: "run-blocked",
+          occurredAt: "2026-07-30T09:00:00.000Z",
+        };
+        yield {
+          kind: "blocked",
+          runId: "run-blocked",
+          occurredAt: "2026-07-30T09:01:00.000Z",
+          blocker: "The requested source path is outside assigned ownership",
+          attemptedAlternatives: [
+            "Searched the allowed Context slice",
+            "Confirmed the missing source is not referenced",
+          ],
+          requiredAuthorityOrInput:
+            "Add the source path to readPaths or provide its contents",
+        };
+      },
+    },
+  });
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const mission = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission that may report a blocker",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  const blocked = await orchestrator.dispatchAssignment(mission.id, {
+    assignment: boundedAssignment,
+    actor: "mission-owner",
+    reason: "Dispatch within the declared ownership boundary",
+  });
+  const replayed = createHarness(eventStore).getMission(mission.id);
+
+  assert.deepEqual(
+    {
+      missionStatus: blocked.status,
+      run: blocked.run,
+      allowedActions: blocked.allowedActions,
+      lastEvent: blocked.events.at(-1).type,
+      replayedRun: replayed.run,
+    },
+    {
+      missionStatus: "RUNNING",
+      run: {
+        id: "run-blocked",
+        status: "BLOCKED",
+        startedAt: "2026-07-30T09:00:00.000Z",
+        updatedAt: "2026-07-30T09:01:00.000Z",
+        summary: null,
+        modelMetadata: null,
+        evidence: [],
+        blocker: "The requested source path is outside assigned ownership",
+        attemptedAlternatives: [
+          "Searched the allowed Context slice",
+          "Confirmed the missing source is not referenced",
+        ],
+        requiredAuthorityOrInput:
+          "Add the source path to readPaths or provide its contents",
+      },
+      allowedActions: [],
+      lastEvent: "AGENT_RUN_BLOCKED",
+      replayedRun: blocked.run,
+    },
+  );
+});
+
+test("transport failure is replayed as an honest Run error without inventing progress", async () => {
+  const eventStore = createMemoryEventStore();
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        throw new Error("Codex agent transport is unavailable");
+      },
+    },
+  });
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const mission = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission that records transport failure",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  await assert.rejects(
+    () =>
+      orchestrator.dispatchAssignment(mission.id, {
+        assignment: boundedAssignment,
+        actor: "mission-owner",
+        reason: "Attempt the bounded dispatch",
+      }),
+    /Codex agent transport is unavailable/,
+  );
+
+  const failed = createHarness(eventStore).getMission(mission.id);
+  assert.deepEqual(
+    {
+      missionStatus: failed.status,
+      assignmentId: failed.assignment.id,
+      runtimeStatus: failed.run.status,
+      error: failed.run.error,
+      eventTypes: failed.events.map((event) => event.type),
+      allowedActions: failed.allowedActions,
+    },
+    {
+      missionStatus: "PLANNED",
+      assignmentId: "assignment-001",
+      runtimeStatus: "ERROR",
+      error: "Codex agent transport is unavailable",
+      eventTypes: [
+        "MISSION_CREATED",
+        "CONTEXT_CAPTURED",
+        "PLAN_ACCEPTED",
+        "ASSIGNMENT_ROUTED",
+        "AGENT_RUN_ERROR",
+      ],
+      allowedActions: [],
+    },
+  );
+});
+
+test("Assignment permission cannot exceed the Mission mutation authority", async () => {
+  let transportStarted = false;
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        transportStarted = true;
+      },
+    },
+  });
+  const orchestrator = createHarness(createMemoryEventStore(), agentRouter);
+  const mission = orchestrator.createMission({
+    brief: { ...validBrief, mutationAuthority: "read-only" },
+    actor: "mission-owner",
+    reason: "Create a read-only Mission",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  await assert.rejects(
+    () =>
+      orchestrator.dispatchAssignment(mission.id, {
+        assignment: {
+          ...boundedAssignment,
+          goal: "Modify the Mission UI",
+          workKind: "implementation",
+          risk: "medium",
+          effectivePermission: "workspace-write",
+          ownershipBoundary: {
+            readPaths: ["codex-mission-control/src/main.js"],
+            writePaths: ["codex-mission-control/src/main.js"],
+          },
+        },
+        actor: "mission-owner",
+        reason: "Attempt to expand a read-only Mission",
+      }),
+    /Assignment workspace-write permission exceeds Mission mutation authority/,
+  );
+
+  assert.deepEqual(
+    {
+      transportStarted,
+      eventTypes: orchestrator
+        .getMission(mission.id)
+        .events.map((event) => event.type),
+    },
+    {
+      transportStarted: false,
+      eventTypes: ["MISSION_CREATED", "CONTEXT_CAPTURED", "PLAN_ACCEPTED"],
     },
   );
 });
