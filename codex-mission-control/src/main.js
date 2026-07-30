@@ -12,10 +12,17 @@ import {
   createMissionWhenHistoryReadable,
   readMissionHistory,
 } from "./mission-history-guard.js";
+import { createAgentRoutingAdapter } from "./agent-routing-adapter.js";
 
+const agentTransport = globalThis.codexAgentTransport ?? null;
+const agentRouter = agentTransport
+  ? createAgentRoutingAdapter({ transport: agentTransport })
+  : null;
+const agentRoutingConnected = Boolean(agentRouter);
 const orchestrator = createMissionOrchestrator({
   eventStore: createLocalStorageEventStore(),
   writeCoordinator: createBrowserWriteCoordinator(),
+  agentRouter,
 });
 
 const app = document.querySelector("#app");
@@ -37,20 +44,62 @@ const nextSteps = {
   accept_plan: {
     label: "Accept Plan",
     eyebrow: "Plan",
-    description: "Approve the mocked build, review, and validation sequence.",
-    reason: "Accepted the Ticket 01 no-release execution plan",
-    payload: () => ({
+    description:
+      "Approve one bounded Assignment followed by review and validation.",
+    reason: "Accepted the bounded no-release execution plan",
+    payload: (mission) => {
+      const authority = mission.brief.mutationAuthority;
+      const workspaceWrite = authority
+        .toLowerCase()
+        .startsWith("workspace-write:");
+      const authorizedRoots = workspaceWrite
+        ? authority
+            .slice("workspace-write:".length)
+            .split(",")
+            .map((path) => path.trim())
+            .filter(Boolean)
+        : ["codex-mission-control"];
+      return {
       plan: {
-        steps: ["Mock local run", "Independent review", "Validation", "Learning"],
+          steps: [
+            "Route one bounded Assignment",
+            "Independent review",
+            "Validation",
+            "Learning",
+          ],
+          assignment: {
+            id: `assignment:${mission.id}:context-${mission.contextPackVersion}`,
+            goal: mission.brief.goal,
+            acceptanceCriteria: mission.brief.acceptanceCriteria,
+            contextSlice: mission.context,
+            ownershipBoundary: {
+              readPaths: authorizedRoots,
+              writePaths: workspaceWrite ? authorizedRoots : [],
+            },
+            effectivePermission: workspaceWrite
+              ? "workspace-write"
+              : "read-only",
+            budget: { maxTurns: 4, maxMinutes: 15 },
+            expectedEvidence: mission.brief.acceptanceCriteria,
+            workKind: workspaceWrite ? "implementation" : "deterministic",
+            risk: mission.brief.risk,
+          },
       },
-    }),
+      };
+    },
     evidenceRefs: [],
   },
   start_run: {
-    label: "Start Mock Run",
+    label: agentRoutingConnected
+      ? "Route Bounded Assignment"
+      : "Start Mock Run",
     eyebrow: "Run",
-    description: "Start a bounded local run without external mutation.",
-    reason: "Started the bounded local mock run",
+    description: agentRoutingConnected
+      ? "Dispatch the declared Assignment through the connected Codex transport."
+      : "Start the explicit Ticket 01 local mock while agent transport is disconnected.",
+    reason: agentRoutingConnected
+      ? "Dispatched the planned bounded Assignment"
+      : "Started the bounded local mock run",
     payload: () => ({
       run: { agentRole: "terra-builder-mock", mode: "local-only" },
     }),
@@ -194,7 +243,7 @@ function renderShell(content, view) {
           <span class="sidebar-team-dot ${commandDeck.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}" aria-hidden="true"></span>
           <div>
             <strong>${commandDeck.metrics.configuredAgents} configured roles</strong>
-            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : "Agent transport disconnected"}</small>
+            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : agentRoutingConnected ? "Agent transport connected · awaiting observations" : "Agent transport disconnected"}</small>
           </div>
         </div>
         <div class="local-mode">
@@ -274,7 +323,7 @@ function renderOverview() {
         <article class="metric-card accent-cyan">
           <span>Configured roles</span>
           <strong>${model.metrics.configuredAgents}</strong>
-          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : "No Assignment / Run observations"}</small>
+          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : agentRoutingConnected ? "Transport connected · no Run observations yet" : "No Assignment / Run observations"}</small>
         </article>
         <article class="metric-card accent-green">
           <span>Active Missions</span>
@@ -299,7 +348,7 @@ function renderOverview() {
             <p class="eyebrow">CONFIGURED SQUAD</p>
             <h2>ทีม Codex</h2>
           </div>
-          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : "Configuration only · transport disconnected"}</span>
+          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : agentRoutingConnected ? "Transport connected · awaiting Run" : "Configuration only · transport disconnected"}</span>
         </div>
         <div class="team-grid">${model.team.map(renderTeamCard).join("")}</div>
       </section>
@@ -770,13 +819,20 @@ async function advanceMission(action) {
   if (!step) return;
 
   try {
-    const updated = await orchestrator.execute(mission.id, {
-      type: MISSION_COMMAND_BY_ACTION[action],
-      payload: step.payload(mission),
-      actor: "mission-owner",
-      reason: step.reason,
-      evidenceRefs: step.evidenceRefs,
-    });
+    const updated =
+      action === "start_run" && agentRoutingConnected
+        ? await orchestrator.dispatchAssignment(mission.id, {
+            assignment: mission.plan.assignment,
+            actor: "mission-owner",
+            reason: step.reason,
+          })
+        : await orchestrator.execute(mission.id, {
+            type: MISSION_COMMAND_BY_ACTION[action],
+            payload: step.payload(mission),
+            actor: "mission-owner",
+            reason: step.reason,
+            evidenceRefs: step.evidenceRefs,
+          });
     notice = {
       kind: "success",
       message:

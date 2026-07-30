@@ -516,6 +516,53 @@ test("replay rejects an event stored under a different Mission identity", () => 
   );
 });
 
+test("replay rejects a routed Assignment that omits required bounds", () => {
+  const source = createHarness();
+  const mission = source.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission before forging an incomplete Assignment",
+  });
+  advanceToPlanned(source, mission.id);
+  const planned = source.getMission(mission.id);
+  const incompleteAssignmentStore = createMemoryEventStore({
+    [mission.id]: [
+      ...planned.events,
+      {
+        id: "event-incomplete-assignment",
+        missionId: mission.id,
+        sequence: planned.events.length + 1,
+        type: "ASSIGNMENT_ROUTED",
+        actor: "mission-owner",
+        occurredAt: "2026-07-30T08:00:00.000Z",
+        reason: "Forge an Assignment without its bounds",
+        contextPackVersion: 1,
+        evidenceRefs: [],
+        data: {
+          assignment: {
+            id: "assignment-incomplete",
+            goal: "Pretend this Assignment is bounded",
+            effectivePermission: "read-only",
+            workKind: "deterministic",
+            risk: "low",
+          },
+          agent: {
+            roleId: "luna_worker",
+            roleName: "Luna Worker",
+            capability: "deterministic",
+            effectivePermission: "read-only",
+          },
+        },
+      },
+    ],
+  });
+
+  assert.throws(
+    () => createHarness(incompleteAssignmentStore).getMission(mission.id),
+    /Assignment acceptanceCriteria must contain at least one item/,
+  );
+});
+
 test("accepted commands require an actor and reason before appending events", () => {
   const orchestrator = createHarness();
 
@@ -1036,6 +1083,77 @@ test("Assignment permission cannot exceed the Mission mutation authority", async
     {
       transportStarted: false,
       eventTypes: ["MISSION_CREATED", "CONTEXT_CAPTURED", "PLAN_ACCEPTED"],
+    },
+  );
+});
+
+test("a second dispatch is rejected before it can append a duplicate Assignment", async () => {
+  const eventStore = createMemoryEventStore();
+  let releaseFirstRun;
+  const firstRunCanComplete = new Promise((resolve) => {
+    releaseFirstRun = resolve;
+  });
+  let transportCall = 0;
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        transportCall += 1;
+        const runId = `run-${transportCall}`;
+        yield {
+          kind: "started",
+          runId,
+          occurredAt: "2026-07-30T10:00:00.000Z",
+        };
+        await firstRunCanComplete;
+        yield {
+          kind: "blocked",
+          runId,
+          occurredAt: "2026-07-30T10:01:00.000Z",
+          blocker: "Smoke run intentionally stopped",
+          attemptedAlternatives: ["Confirmed duplicate dispatch protection"],
+          requiredAuthorityOrInput: "No further input required",
+        };
+      },
+    },
+  });
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const mission = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for duplicate dispatch protection",
+  });
+  advanceToPlanned(orchestrator, mission.id);
+
+  const firstDispatch = orchestrator.dispatchAssignment(mission.id, {
+    assignment: boundedAssignment,
+    actor: "mission-owner",
+    reason: "Dispatch the one allowed Assignment",
+  });
+  const secondDispatch = orchestrator.dispatchAssignment(mission.id, {
+    assignment: { ...boundedAssignment, id: "assignment-duplicate" },
+    actor: "mission-owner",
+    reason: "Attempt a duplicate Assignment",
+  });
+  await assert.rejects(
+    secondDispatch,
+    /Mission already has Assignment assignment-001/,
+  );
+  releaseFirstRun();
+  await firstDispatch;
+
+  const replayed = createHarness(eventStore).getMission(mission.id);
+  assert.deepEqual(
+    {
+      assignmentEvents: replayed.events.filter(
+        (event) => event.type === "ASSIGNMENT_ROUTED",
+      ).length,
+      assignmentId: replayed.assignment.id,
+      runStatus: replayed.run.status,
+    },
+    {
+      assignmentEvents: 1,
+      assignmentId: "assignment-001",
+      runStatus: "BLOCKED",
     },
   );
 });

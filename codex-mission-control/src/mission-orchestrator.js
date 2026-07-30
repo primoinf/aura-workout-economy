@@ -1,3 +1,5 @@
+import { assertValidAgentAssignment } from "./agent-assignment.js";
+
 const REQUIRED_BRIEF_FIELDS = [
   "goal",
   "scope",
@@ -102,12 +104,16 @@ const EVENT_PROJECTIONS = Object.fromEntries(
   Object.values(COMMANDS).map((command) => [command.eventType, command]),
 );
 
+const AGENT_EVENT_TYPE_BY_OBSERVATION = Object.freeze({
+  RUN_STARTED: "AGENT_RUN_STARTED",
+  RUN_UPDATED: "AGENT_RUN_UPDATED",
+  RUN_COMPLETED: "AGENT_RUN_COMPLETED",
+  RUN_BLOCKED: "AGENT_RUN_BLOCKED",
+});
+
 const AGENT_EVENT_TYPES = new Set([
   "ASSIGNMENT_ROUTED",
-  "AGENT_RUN_STARTED",
-  "AGENT_RUN_UPDATED",
-  "AGENT_RUN_COMPLETED",
-  "AGENT_RUN_BLOCKED",
+  ...Object.values(AGENT_EVENT_TYPE_BY_OBSERVATION),
   "AGENT_RUN_ERROR",
 ]);
 
@@ -258,8 +264,13 @@ function projectAgentEvent(mission, event) {
     }
     assertReplayObject(event.data.assignment, event, "assignment");
     assertReplayObject(event.data.agent, event, "agent");
-    assertReplayString(event.data.assignment.id, event, "Assignment ID");
-    assertReplayString(event.data.assignment.goal, event, "Assignment goal");
+    try {
+      assertValidAgentAssignment(event.data.assignment);
+    } catch (error) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ${error.message}`,
+      );
+    }
     assertReplayString(event.data.agent.roleId, event, "agent role");
     assertReplayString(
       event.data.agent.effectivePermission,
@@ -789,6 +800,11 @@ export function createMissionOrchestrator({
                 `Assignment routing is not allowed while Mission is ${mission.status}.`,
               );
             }
+            if (mission.assignment) {
+              throw new Error(
+                `Mission already has Assignment ${mission.assignment.id}.`,
+              );
+            }
             assertAssignmentWithinMissionAuthority(mission, routing);
           },
         }),
@@ -799,7 +815,13 @@ export function createMissionOrchestrator({
           await writeCoordinator.runExclusive(() => {
             const mission = getMission(missionId);
             const run = runFromObservation(mission, observation);
-            const eventType = `AGENT_${observation.type}`;
+            const eventType =
+              AGENT_EVENT_TYPE_BY_OBSERVATION[observation.type];
+            if (!eventType) {
+              throw new Error(
+                `Unsupported agent observation: ${observation.type}.`,
+              );
+            }
             const eventReason =
               observation.summary ??
               observation.blocker ??
