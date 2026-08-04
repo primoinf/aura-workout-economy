@@ -1,4 +1,8 @@
 import { assertValidAgentAssignment } from "./agent-assignment.js";
+import {
+  artifactHasInspectableDetail,
+  artifactReference,
+} from "./artifact-inspection.js";
 
 const REQUIRED_BRIEF_FIELDS = [
   "goal",
@@ -437,6 +441,38 @@ function assertReplayString(value, event, field) {
   }
 }
 
+function assertPassingGatePayload(payload, event, field) {
+  if (typeof payload.summary !== "string" || payload.summary.trim() === "") {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires a passing ${field} summary.`,
+    );
+  }
+  const assertPassingMarker = (value, label) => {
+    if (
+      value !== undefined &&
+      !["PASS", "PASSED"].includes(String(value).toUpperCase())
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ${event.type} has a non-passing ${field} ${label}.`,
+      );
+    }
+  };
+  assertPassingMarker(payload.outcome, "outcome");
+  assertPassingMarker(payload.status, "status");
+  assertPassingMarker(payload.details?.outcome, "details.outcome");
+  assertPassingMarker(payload.details?.status, "details.status");
+  if (payload.passed !== undefined && payload.passed !== true) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} has a non-passing ${field} result.`,
+    );
+  }
+  if (payload.details?.passed !== undefined && payload.details.passed !== true) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} has a non-passing ${field} details.passed result.`,
+    );
+  }
+}
+
 function assertBlockDetails(block, errorPrefix) {
   if (
     !block ||
@@ -458,13 +494,35 @@ function assertBlockDetails(block, errorPrefix) {
   }
 }
 
-function artifactReference(artifact) {
-  if (!artifact || typeof artifact !== "object") {
-    return null;
+function assertDistinctReleaseGateEvidence(mission, event) {
+  if (!mission.brief.releaseRequired) {
+    return;
   }
-  return ["uri", "path", "ref", "id"]
-    .map((field) => artifact[field])
-    .find((value) => typeof value === "string" && value.trim() !== "") ?? null;
+  const priorEvidenceRefs = appendUniqueStrings(
+    mission.artifactEvidenceRefs ?? [],
+    mission.reviewEvidenceRefs ?? [],
+  );
+  const eventEvidenceRefs = event.evidenceRefs;
+  if (
+    new Set(eventEvidenceRefs).size !== eventEvidenceRefs.length ||
+    eventEvidenceRefs.some((reference) => priorEvidenceRefs.includes(reference))
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires Evidence refs distinct from earlier release gates.`,
+    );
+  }
+}
+
+function assertInspectableReleaseArtifacts(artifacts, event) {
+  if (
+    !Array.isArray(artifacts) ||
+    artifacts.length === 0 ||
+    artifacts.some((artifact) => !artifactHasInspectableDetail(artifact))
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: release-required candidate Artifacts must include inline diff, patch, or content before approval.`,
+    );
+  }
 }
 
 function appendUniqueStrings(...collections) {
@@ -1117,6 +1175,14 @@ function projectMission(events, expectedMissionId) {
         `Cannot replay event ${event.sequence}: ${event.type} requires ${projection.field}.`,
       );
     }
+    if (event.type === "REVIEW_PASSED") {
+      assertPassingGatePayload(event.data.review, event, "review");
+      assertDistinctReleaseGateEvidence(mission, event);
+    }
+    if (event.type === "VALIDATION_PASSED") {
+      assertPassingGatePayload(event.data.validation, event, "validation");
+      assertDistinctReleaseGateEvidence(mission, event);
+    }
     if (projection.requiresEvidence && event.evidenceRefs.length === 0) {
       throw new Error(
         `Cannot replay event ${event.sequence}: ${event.type} requires Evidence.`,
@@ -1161,6 +1227,12 @@ function projectMission(events, expectedMissionId) {
     ) {
       throw new Error(
         `Cannot replay event ${event.sequence}: ARTIFACT_SUBMITTED requires a regenerated Artifact reference.`,
+      );
+    }
+    if (event.type === "VALIDATION_PASSED" && mission.brief.releaseRequired) {
+      assertInspectableReleaseArtifacts(
+        mission.artifacts ?? [mission.artifact],
+        event,
       );
     }
 

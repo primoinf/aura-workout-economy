@@ -58,7 +58,8 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
-a:focus-visible {
+a:focus-visible,
+pre[tabindex="0"]:focus-visible {
   outline: 3px solid rgba(39, 215, 255, 0.55);
   outline-offset: 3px;
 }
@@ -2050,6 +2051,14 @@ h1 {
   color: var(--green);
 }
 
+.approval-status.is-rejected {
+  border-color: rgba(255, 190, 92, 0.34);
+}
+
+.approval-status.is-rejected span {
+  color: var(--amber);
+}
+
 .approval-summary-grid,
 .release-commitment-grid,
 .approval-ledger-grid {
@@ -2097,14 +2106,22 @@ h1 {
 }
 
 .approval-artifact-set li {
-  display: grid;
-  grid-template-columns: 68px minmax(110px, 0.6fr) minmax(0, 1.4fr);
-  align-items: center;
-  gap: 10px;
+  display: block;
   min-width: 0;
   padding: 12px;
   border: 1px solid rgba(169, 148, 255, 0.24);
   border-radius: 9px;
+}
+
+.approval-artifact + .approval-artifact {
+  margin-top: 8px;
+}
+
+.approval-artifact-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .approval-artifact-set span {
@@ -2122,11 +2139,58 @@ h1 {
 }
 
 .approval-artifact-set code {
+  display: block;
+  margin-top: 7px;
   overflow: hidden;
   color: var(--muted);
   font-size: 9px;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+.artifact-summary {
+  margin: 10px 0 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.artifact-review-detail {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.artifact-review-detail > span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-review-detail pre,
+.evidence-detail {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid rgba(28, 52, 68, 0.9);
+  border-radius: 7px;
+  background: rgba(3, 10, 16, 0.7);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.artifact-detail-missing {
+  margin: 0;
+  color: var(--amber);
+  font-size: 10px;
+  line-height: 1.55;
 }
 
 .candidate-meta {
@@ -2151,21 +2215,43 @@ h1 {
 }
 
 .approval-evidence-card li {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 8px;
+  display: block;
   padding: 9px 0;
   border-top: 1px solid rgba(28, 52, 68, 0.66);
 }
 
-.approval-evidence-card li span {
+.approval-evidence-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.approval-evidence-heading span {
   color: var(--green);
 }
 
-.approval-evidence-card code {
+.approval-evidence-heading code {
   overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 10px;
+}
+
+.approval-evidence p {
+  margin: 7px 0 3px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.approval-evidence small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.evidence-detail {
+  max-height: 150px;
+  margin-top: 8px;
 }
 
 .release-commitment-grid {
@@ -2254,6 +2340,16 @@ h1 {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.6;
+}
+
+.approval-recorded.approval-blocked {
+  border-color: rgba(255, 190, 92, 0.36);
+  background: rgba(255, 190, 92, 0.08);
+}
+
+.approval-recorded.approval-blocked > span {
+  background: rgba(255, 190, 92, 0.18);
+  color: var(--amber);
 }
 
 .approval-history > li {
@@ -2588,10 +2684,6 @@ h1 {
 
   .approval-actions {
     display: grid;
-    grid-template-columns: 1fr;
-  }
-
-  .approval-artifact-set li {
     grid-template-columns: 1fr;
   }
 

@@ -337,6 +337,65 @@ export function deriveCommandDeckModel(missions) {
   });
 }
 
+function evidenceDetailsForReference(mission, reference) {
+  const sourceEvents = [...mission.events].reverse();
+  const sourceEvent =
+    sourceEvents.find(
+      (event) =>
+        event.evidenceRefs?.includes(reference) &&
+        !["RELEASE_APPROVED", "RELEASE_REJECTED"].includes(event.type),
+    ) ?? sourceEvents.find((event) => event.evidenceRefs?.includes(reference));
+  const runEvidence = sourceEvent?.data?.run?.evidence?.find(
+    (item) => item.ref === reference,
+  );
+  const sourceArtifact = sourceEvent?.data?.artifact;
+  const sourcePayload =
+    sourceEvent?.data?.review ??
+    sourceEvent?.data?.validation ??
+    sourceEvent?.data?.approval ??
+    null;
+  const payloadDetails = sourcePayload
+    ? (() => {
+        const { summary: _summary, details, ...remaining } = sourcePayload;
+        return details && typeof details === "object" && !Array.isArray(details)
+          ? { ...remaining, ...details }
+          : remaining;
+      })()
+    : null;
+  const artifactDetails = sourceArtifact
+    ? Object.fromEntries(
+        Object.entries(sourceArtifact).filter(
+          ([key]) =>
+            !["name", "summary", "uri", "path", "ref", "id"].includes(key),
+        ),
+      )
+    : null;
+  const details = runEvidence
+    ? Object.fromEntries(
+        Object.entries(runEvidence).filter(
+          ([key]) => !["ref", "kind", "summary"].includes(key),
+        ),
+      )
+    : payloadDetails ?? artifactDetails;
+
+  return Object.freeze({
+    ref: reference,
+    kind:
+      runEvidence?.kind ??
+      sourcePayload?.kind ??
+      (sourceArtifact ? "artifact" : sourceEvent?.type ?? "evidence"),
+    summary:
+      runEvidence?.summary ??
+      sourcePayload?.summary ??
+      sourceArtifact?.summary ??
+      sourceEvent?.reason ??
+      "No Evidence summary recorded",
+    sourceEventType: sourceEvent?.type ?? "UNKNOWN",
+    sourceSequence: sourceEvent?.sequence ?? null,
+    details: details && Object.keys(details).length > 0 ? details : null,
+  });
+}
+
 export function deriveApprovalRoomModel(mission) {
   const releaseDecision = mission.releaseReadiness ?? mission.approval;
   if (!mission.brief.releaseRequired || !releaseDecision) {
@@ -378,8 +437,14 @@ export function deriveApprovalRoomModel(mission) {
     candidateArtifacts: Object.freeze(
       structuredClone(releaseDecision.candidateArtifacts),
     ),
+    decision: releaseDecision.decision ?? null,
     contextPackVersion: releaseDecision.contextPackVersion,
     evidence: Object.freeze([...releaseDecision.evidenceRefs]),
+    evidenceDetails: Object.freeze(
+      releaseDecision.evidenceRefs.map((reference) =>
+        evidenceDetailsForReference(mission, reference),
+      ),
+    ),
     residualRisk: releaseDecision.residualRisk,
     intendedExternalAction: releaseDecision.intendedExternalAction,
     rollbackCommitment: releaseDecision.rollbackCommitment,

@@ -14,6 +14,13 @@ import {
   readMissionHistory,
 } from "./mission-history-guard.js";
 import { createAgentRoutingAdapter } from "./agent-routing-adapter.js";
+import {
+  buildApprovalDecisionCommand,
+  escapeHtml,
+  formatDate,
+  humanize,
+  renderApprovalRoomContent,
+} from "./approval-room-view.js";
 
 const agentTransport = globalThis.codexAgentTransport ?? null;
 const agentRouter = agentTransport
@@ -115,12 +122,27 @@ const nextSteps = {
     eyebrow: "Artifact",
     description: "Attach the local tracer-bullet artifact for review.",
     reason: "Submitted the local tracer-bullet artifact",
-    payload: (mission) => ({
-      artifact: {
-        name: `Mission Control candidate ${mission.events.length + 1}`,
-        uri: localEventRef(mission, "artifact"),
-      },
-    }),
+    payload: (mission) => {
+      const reference = localEventRef(mission, "artifact");
+      return {
+        artifact: {
+          name: `Mission Control candidate ${mission.events.length + 1}`,
+          uri: reference,
+          summary: "Local event-backed candidate manifest",
+          content: JSON.stringify(
+            {
+              candidateType: "mission-control-event-backed",
+              missionId: mission.id,
+              contextPackVersion: mission.contextPackVersion,
+              sourceRef: reference,
+              externalMutation: "none",
+            },
+            null,
+            2,
+          ),
+        },
+      };
+    },
     evidenceRefs: (mission) => [localEventRef(mission, "artifact-evidence")],
   },
   pass_review: {
@@ -128,8 +150,17 @@ const nextSteps = {
     eyebrow: "Review Gate",
     description: "Record a mocked independent review with no material findings.",
     reason: "Mock independent review found no material issues",
-    payload: () => ({
-      review: { summary: "No material correctness or security findings" },
+    payload: (mission) => ({
+      review: {
+        summary: "No material correctness or security findings",
+        details: {
+          gate: "Review Gate",
+          candidateRef: mission.artifact?.uri ?? null,
+          evidenceRef: localEventRef(mission, "review-pass"),
+          outcome: "passed",
+          method: "Local event-backed review",
+        },
+      },
     }),
     evidenceRefs: (mission) => [localEventRef(mission, "review-pass")],
   },
@@ -152,8 +183,20 @@ const nextSteps = {
     eyebrow: "Validation Gate",
     description: "Record passing local acceptance evidence.",
     reason: "Local acceptance validation passed",
-    payload: () => ({
-      validation: { summary: "Lifecycle and replay acceptance checks passed" },
+    payload: (mission) => ({
+      validation: {
+        summary: "Lifecycle and replay acceptance checks passed",
+        details: {
+          gate: "Validation Gate",
+          candidateRef: mission.artifact?.uri ?? null,
+          evidenceRef: localEventRef(mission, "validation-pass"),
+          outcome: "passed",
+          checks: [
+            "Lifecycle transition is replayable",
+            "Current Artifact and gate Evidence are present",
+          ],
+        },
+      },
     }),
     evidenceRefs: (mission) => [localEventRef(mission, "validation-pass")],
   },
@@ -277,30 +320,12 @@ let activeView =
 let notice = null;
 let historyReadError = null;
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function formatDate(iso) {
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(iso));
-}
-
-function humanize(value) {
-  return value.toLowerCase().replaceAll("_", " ");
-}
-
 function isApprovalRouteAvailable(mission) {
   return (
     mission?.brief.releaseRequired &&
-    ["APPROVAL_REQUIRED", "READY_TO_RELEASE"].includes(mission.status)
+    (["APPROVAL_REQUIRED", "READY_TO_RELEASE"].includes(mission.status) ||
+      (mission.status === "CHANGES_REQUESTED" &&
+        mission.approval?.decision === "REJECTED"))
   );
 }
 
@@ -622,6 +647,9 @@ function renderSignal(signal) {
 function renderMissionDetail(mission) {
   const flow = deriveMissionFlowModel(mission);
   const approvalRouteAvailable = isApprovalRouteAvailable(mission);
+  const approvalRejected =
+    mission.status === "CHANGES_REQUESTED" &&
+    mission.approval?.decision === "REJECTED";
   const missionActions = mission.allowedActions.filter(
     (action) =>
       !["approve_release", "reject_release"].includes(action),
@@ -738,8 +766,8 @@ function renderMissionDetail(mission) {
                 <section class="action-card approval-entry-card" aria-labelledby="next-action-title">
                   <div>
                     <p class="eyebrow">HUMAN RELEASE GATE</p>
-                    <h2 id="next-action-title">${mission.status === "APPROVAL_REQUIRED" ? "Review the exact release candidate" : "Release readiness recorded"}</h2>
-                    <p>${mission.status === "APPROVAL_REQUIRED" ? "Open the Review Ledger to inspect current Evidence, residual risk, external action, and rollback commitment before deciding." : "Inspect the immutable human decision. No release or deployment has occurred."}</p>
+                    <h2 id="next-action-title">${mission.status === "APPROVAL_REQUIRED" ? "Review the exact release candidate" : approvalRejected ? "Review the rejected release snapshot" : "Release readiness recorded"}</h2>
+                    <p>${mission.status === "APPROVAL_REQUIRED" ? "Open the Review Ledger to inspect current Evidence, residual risk, external action, and rollback commitment before deciding." : approvalRejected ? "Inspect the immutable rejected candidate and rationale. No release or deployment has occurred." : "Inspect the immutable human decision. No release or deployment has occurred."}</p>
                   </div>
                   <button class="primary-button action-button" type="button" data-route="approval">
                     Open Approval Room <span aria-hidden="true">→</span>
@@ -880,147 +908,7 @@ function renderMissionDetail(mission) {
 
 function renderApprovalRoom(mission) {
   const model = deriveApprovalRoomModel(mission);
-  const isPending = model.status === "APPROVAL_REQUIRED";
-  const decisionHistory =
-    model.decisionHistory.length === 0
-      ? `<li class="approval-history-empty">No human decision has been recorded for this candidate.</li>`
-      : [...model.decisionHistory]
-          .reverse()
-          .map(
-            (decision) => `
-              <li>
-                <span class="decision-sequence">${String(decision.sequence).padStart(2, "0")}</span>
-                <div>
-                  <strong>${escapeHtml(humanize(decision.type))}</strong>
-                  <p>${escapeHtml(decision.summary)}</p>
-                  <small>${escapeHtml(decision.actor)} · ${escapeHtml(decision.reason)}</small>
-                </div>
-                <time datetime="${escapeHtml(decision.occurredAt)}">${escapeHtml(formatDate(decision.occurredAt))}</time>
-              </li>
-            `,
-          )
-          .join("");
-
-  renderShell(
-    `
-      <section class="approval-hero">
-        <div>
-          <button class="back-link" type="button" data-route="detail">← Mission Flow</button>
-          <p class="eyebrow">${escapeHtml(mission.id)} · REVIEW LEDGER</p>
-          <h1 id="page-title" tabindex="-1">${isPending ? "Release decision required" : "Release readiness recorded"}</h1>
-          <p>${escapeHtml(model.goal)}</p>
-        </div>
-        <div class="approval-status ${isPending ? "is-pending" : "is-approved"}">
-          <span>${isPending ? "Awaiting" : "Approved"}</span>
-          <strong>${escapeHtml(humanize(model.status))}</strong>
-          <small>No external action executed</small>
-        </div>
-      </section>
-
-      <section class="approval-summary-grid" aria-label="Release decision summary">
-        <article class="approval-candidate-card">
-          <p class="eyebrow">EXACT CANDIDATE</p>
-          <h2>${escapeHtml(model.candidate.name ?? "Release candidate")}</h2>
-          <ul class="approval-artifact-set" aria-label="Candidate Artifact set">
-            ${model.candidateArtifacts
-              .map(
-                (artifact, index) => `
-                  <li>
-                    <span>${index === 0 ? "Primary" : `Artifact ${index + 1}`}</span>
-                    <strong>${escapeHtml(artifact.name ?? `Candidate Artifact ${index + 1}`)}</strong>
-                    <code>${escapeHtml(artifact.uri ?? artifact.path ?? artifact.ref ?? artifact.id)}</code>
-                  </li>
-                `,
-              )
-              .join("")}
-          </ul>
-          <div class="candidate-meta">
-            <span>Artifact set <strong>${model.candidateArtifacts.length}</strong></span>
-            <span>Context Pack <strong>v${model.contextPackVersion}</strong></span>
-            <span>Authority <strong>${escapeHtml(model.releaseAuthority)}</strong></span>
-          </div>
-        </article>
-
-        <article class="approval-evidence-card">
-          <p class="eyebrow">CURRENT PASSING EVIDENCE</p>
-          <h2>${model.evidence.length} references</h2>
-          <ul>
-            ${model.evidence.map((reference) => `<li><span aria-hidden="true">✓</span><code>${escapeHtml(reference)}</code></li>`).join("")}
-          </ul>
-        </article>
-      </section>
-
-      <section class="release-commitment-grid" aria-label="Release commitments">
-        <article>
-          <span class="commitment-index">01</span>
-          <p class="eyebrow">RESIDUAL RISK</p>
-          <h2>What can still go wrong</h2>
-          <p>${escapeHtml(model.residualRisk)}</p>
-        </article>
-        <article>
-          <span class="commitment-index">02</span>
-          <p class="eyebrow">INTENDED EXTERNAL ACTION</p>
-          <h2>What approval permits next</h2>
-          <p>${escapeHtml(model.intendedExternalAction)}</p>
-        </article>
-        <article>
-          <span class="commitment-index">03</span>
-          <p class="eyebrow">ROLLBACK COMMITMENT</p>
-          <h2>How failure will be reversed</h2>
-          <p>${escapeHtml(model.rollbackCommitment)}</p>
-        </article>
-      </section>
-
-      <div class="approval-ledger-grid">
-        <section class="ledger-panel approval-decision-panel" aria-labelledby="approval-decision-title">
-          <div class="section-heading compact">
-            <div>
-              <p class="eyebrow">HUMAN AUTHORITY</p>
-              <h2 id="approval-decision-title">${isPending ? "Record a bounded decision" : "Decision is immutable"}</h2>
-            </div>
-            <span class="record-count">${escapeHtml(model.releaseAuthority)}</span>
-          </div>
-          ${
-            isPending
-              ? `
-                <form id="approval-decision-form" class="approval-form">
-                  <label class="field">
-                    <span>Decision summary</span>
-                    <textarea name="approvalSummary" required rows="4" placeholder="Explain why this exact candidate is approved or rejected."></textarea>
-                  </label>
-                  <p class="approval-boundary">Approval updates Mission state only. It does not commit, push, open a pull request, release, or deploy.</p>
-                  <div class="approval-actions">
-                    <button class="secondary-button danger-button" type="submit" name="decision" value="reject">Reject and request changes</button>
-                    <button class="primary-button" type="submit" name="decision" value="approve">Approve release readiness</button>
-                  </div>
-                </form>
-              `
-              : `
-                <div class="approval-recorded">
-                  <span aria-hidden="true">✓</span>
-                  <div>
-                    <strong>Ready to release—not released.</strong>
-                    <p>The human decision is recorded below. A separate release capability and authority are still required.</p>
-                  </div>
-                </div>
-              `
-          }
-        </section>
-
-        <section class="ledger-panel" aria-labelledby="decision-history-title">
-          <div class="section-heading compact">
-            <div>
-              <p class="eyebrow">IMMUTABLE DECISION HISTORY</p>
-              <h2 id="decision-history-title">Approval events</h2>
-            </div>
-            <span class="record-count">${model.decisionHistory.length} recorded</span>
-          </div>
-          <ol class="approval-history">${decisionHistory}</ol>
-        </section>
-      </div>
-    `,
-    "approval",
-  );
+  renderShell(renderApprovalRoomContent(model), "approval");
 }
 
 function renderAgentLane(role) {
@@ -1229,28 +1117,12 @@ async function handleApprovalDecision(event) {
     new FormData(event.currentTarget).get("approvalSummary"),
   ).trim();
   const decision = event.submitter?.value;
-  if (!["approve", "reject"].includes(decision)) {
-    notice = {
-      kind: "error",
-      message: "Choose approve or reject before recording a decision.",
-    };
-    render();
-    return;
-  }
-  const action =
-    decision === "approve" ? "APPROVE_RELEASE" : "REJECT_RELEASE";
 
   try {
-    const updated = await orchestrator.execute(mission.id, {
-      type: action,
-      payload: { approval: { summary } },
-      actor: mission.brief.releaseAuthority,
-      reason:
-        decision === "approve"
-          ? "Release authority approved the exact current candidate"
-          : "Release authority rejected the exact current candidate",
-      evidenceRefs: mission.releaseReadiness.evidenceRefs,
-    });
+    const updated = await orchestrator.execute(
+      mission.id,
+      buildApprovalDecisionCommand(mission, { decision, summary }),
+    );
     notice = {
       kind: "success",
       message:

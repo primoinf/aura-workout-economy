@@ -135,7 +135,6 @@ test("Command Deck derives honest metrics and configured team state from Mission
       },
     },
   );
-
 });
 
 test("Mission Flow derives lifecycle completion and evidence counts without inventing confidence", () => {
@@ -227,7 +226,6 @@ test("Mission Flow derives lifecycle completion and evidence counts without inve
       },
     },
   );
-
 });
 
 test("team telemetry is derived only from observable Assignment and Run state", () => {
@@ -338,6 +336,7 @@ test("team telemetry is derived only from observable Assignment and Run state", 
       },
     },
   );
+
 });
 
 test("team telemetry exposes an observed transport error as error, not working", () => {
@@ -690,6 +689,194 @@ test("Mission Flow surfaces the human rejection rationale at the Approval stage"
       },
     },
   );
+
+});
+
+test("Approval Room traces current Evidence refs to observable summaries and source events", () => {
+  const mission = {
+    id: "mission-evidence-trace",
+    brief: {
+      ...brief,
+      releaseRequired: true,
+      releaseAuthorized: true,
+      releaseAuthority: "release-owner",
+    },
+    status: "APPROVAL_REQUIRED",
+    contextPackVersion: 1,
+    releaseReadiness: {
+      candidate: {
+        name: "release-42",
+        uri: "artifact://release-42",
+        diff: "diff",
+      },
+      candidateArtifacts: [
+        { name: "release-42", uri: "artifact://release-42", diff: "diff" },
+      ],
+      contextPackVersion: 1,
+      evidenceRefs: ["evidence://run", "evidence://review"],
+      residualRisk: "Rollback may be required",
+      intendedExternalAction: "Deploy release-42",
+      rollbackCommitment: "Restore release-41",
+    },
+    allowedActions: ["approve_release", "reject_release"],
+    events: [
+      {
+        ...event(4, "AGENT_RUN_COMPLETED", "2026-08-04T12:00:00.000Z", [
+          "evidence://run",
+        ]),
+        data: {
+          run: {
+            evidence: [
+              {
+                ref: "evidence://run",
+                kind: "inspection",
+                summary: "Run captured the exact diff",
+                checks: ["diff present"],
+              },
+            ],
+          },
+        },
+      },
+      {
+        ...event(5, "REVIEW_PASSED", "2026-08-04T12:01:00.000Z", [
+          "evidence://review",
+        ]),
+        data: {
+          review: {
+            summary: "Independent review passed",
+            details: {
+              reviewer: "sol-reviewer",
+              findings: [],
+            },
+          },
+        },
+      },
+    ],
+  };
+
+  const model = deriveApprovalRoomModel(mission);
+
+  assert.deepEqual(model.evidenceDetails, [
+    {
+      ref: "evidence://run",
+      kind: "inspection",
+      summary: "Run captured the exact diff",
+      sourceEventType: "AGENT_RUN_COMPLETED",
+      sourceSequence: 4,
+      details: { checks: ["diff present"] },
+    },
+    {
+      ref: "evidence://review",
+      kind: "REVIEW_PASSED",
+      summary: "Independent review passed",
+      sourceEventType: "REVIEW_PASSED",
+      sourceSequence: 5,
+      details: { reviewer: "sol-reviewer", findings: [] },
+    },
+  ]);
+
+  const approvedModel = deriveApprovalRoomModel({
+    ...mission,
+    status: "READY_TO_RELEASE",
+    events: [
+      ...mission.events,
+      {
+        ...event(
+          6,
+          "RELEASE_APPROVED",
+          "2026-08-04T12:02:00.000Z",
+          ["evidence://run", "evidence://review"],
+        ),
+        data: {
+          approval: {
+            decision: "APPROVED",
+            summary: "Approved after inspecting the current evidence",
+          },
+        },
+      },
+    ],
+  });
+
+  assert.equal(approvedModel.evidenceDetails[0].summary, "Run captured the exact diff");
+  assert.equal(approvedModel.evidenceDetails[1].summary, "Independent review passed");
+
+  const artifactModel = deriveApprovalRoomModel({
+    ...mission,
+    releaseReadiness: {
+      ...mission.releaseReadiness,
+      evidenceRefs: ["evidence://artifact"],
+    },
+    events: [
+      {
+        ...event(3, "ARTIFACT_SUBMITTED", "2026-08-04T11:59:00.000Z", [
+          "evidence://artifact",
+        ]),
+        data: {
+          artifact: {
+            name: "release-42",
+            uri: "artifact://release-42",
+            diff: "@@ release-42 @@\n+candidate content",
+          },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(artifactModel.evidenceDetails[0], {
+    ref: "evidence://artifact",
+    kind: "artifact",
+    summary: "Record ARTIFACT_SUBMITTED",
+    sourceEventType: "ARTIFACT_SUBMITTED",
+    sourceSequence: 3,
+    details: { diff: "@@ release-42 @@\n+candidate content" },
+  });
+
+  const rejectedMission = {
+    ...mission,
+    status: "CHANGES_REQUESTED",
+    releaseReadiness: null,
+    approval: {
+      decision: "REJECTED",
+      summary: "Regenerate the candidate with a clearer rollback proof",
+      ...mission.releaseReadiness,
+    },
+    allowedActions: ["start_correction", "revise_context"],
+    events: [
+      ...mission.events,
+      {
+        ...event(
+          6,
+          "RELEASE_REJECTED",
+          "2026-08-04T12:02:00.000Z",
+          ["evidence://run", "evidence://review"],
+        ),
+        data: {
+          approval: {
+            decision: "REJECTED",
+            summary: "Regenerate the candidate with a clearer rollback proof",
+            ...mission.releaseReadiness,
+          },
+        },
+      },
+    ],
+  };
+  const rejectedModel = deriveApprovalRoomModel(rejectedMission);
+  assert.deepEqual(
+    {
+      status: rejectedModel.status,
+      decision: rejectedModel.decision,
+      candidate: rejectedModel.candidate,
+      canApprove: rejectedModel.canApprove,
+      canReject: rejectedModel.canReject,
+    },
+    {
+      status: "CHANGES_REQUESTED",
+      decision: "REJECTED",
+      candidate: mission.releaseReadiness.candidate,
+      canApprove: false,
+      canReject: false,
+    },
+  );
 });
 
 test("Review Ledger derives the exact current release decision without inventing deployment", () => {
@@ -744,6 +931,7 @@ test("Review Ledger derives the exact current release decision without inventing
       artifact: {
         name: "release-42",
         uri: "artifact://release-42",
+        diff: "@@ release-42 @@\n+candidate content",
       },
     },
     "Submit release candidate",
@@ -801,11 +989,13 @@ test("Review Ledger derives the exact current release decision without inventing
         candidate: {
           name: "release-42",
           uri: "artifact://release-42",
+          diff: "@@ release-42 @@\n+candidate content",
         },
         candidateArtifacts: [
           {
             name: "release-42",
             uri: "artifact://release-42",
+            diff: "@@ release-42 @@\n+candidate content",
           },
         ],
         evidence: [

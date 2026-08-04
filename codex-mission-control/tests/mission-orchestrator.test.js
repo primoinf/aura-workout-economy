@@ -45,6 +45,14 @@ const boundedAssignment = {
   risk: "low",
 };
 
+function releaseArtifact(name, uri) {
+  return {
+    name,
+    uri,
+    diff: `@@ ${name} @@\n+${name} candidate content`,
+  };
+}
+
 function createHarness(
   eventStore = createMemoryEventStore(),
   agentRouter = undefined,
@@ -80,7 +88,17 @@ function advanceToPlanned(orchestrator, missionId) {
   });
 }
 
-function createReleaseMissionAtApproval(orchestrator) {
+function createReleaseMissionAtApproval(
+  orchestrator,
+  {
+    artifact = releaseArtifact(
+      "release-candidate-1",
+      "artifact://release-candidate-1",
+    ),
+    stopBeforeReview = false,
+    stopBeforeValidation = false,
+  } = {},
+) {
   const releaseBrief = {
     ...validBrief,
     releaseRequired: true,
@@ -128,30 +146,29 @@ function createReleaseMissionAtApproval(orchestrator) {
   );
   execute(
     "SUBMIT_ARTIFACT",
-    {
-      artifact: {
-        name: "release-candidate-1",
-        uri: "artifact://release-candidate-1",
-      },
-    },
+    { artifact },
     "Submit exact release candidate",
     ["evidence://artifact-release-1"],
   );
-  execute(
-    "PASS_REVIEW",
-    { review: { summary: "Independent review passed" } },
-    "Pass independent review",
-    ["evidence://review-release-1"],
-  );
+  if (!stopBeforeReview) {
+    execute(
+      "PASS_REVIEW",
+      { review: { summary: "Independent review passed" } },
+      "Pass independent review",
+      ["evidence://review-release-1"],
+    );
+  }
   return {
     created,
     execute,
-    approvalRequired: execute(
-      "PASS_VALIDATION",
-      { validation: { summary: "Release acceptance suite passed" } },
-      "Pass release validation",
-      ["evidence://validation-release-1"],
-    ),
+    approvalRequired: stopBeforeReview || stopBeforeValidation
+      ? null
+      : execute(
+          "PASS_VALIDATION",
+          { validation: { summary: "Release acceptance suite passed" } },
+          "Pass release validation",
+          ["evidence://validation-release-1"],
+        ),
   };
 }
 
@@ -326,10 +343,10 @@ test("current passing gates move a release-required Mission into human approval"
   execute(
     "SUBMIT_ARTIFACT",
     {
-      artifact: {
-        name: "release-candidate-1",
-        uri: "artifact://release-candidate-1",
-      },
+      artifact: releaseArtifact(
+        "release-candidate-1",
+        "artifact://release-candidate-1",
+      ),
     },
     "Submit exact release candidate",
     ["evidence://artifact-release-1"],
@@ -357,15 +374,15 @@ test("current passing gates move a release-required Mission into human approval"
     {
       status: "APPROVAL_REQUIRED",
       releaseReadiness: {
-        candidate: {
-          name: "release-candidate-1",
-          uri: "artifact://release-candidate-1",
-        },
+        candidate: releaseArtifact(
+          "release-candidate-1",
+          "artifact://release-candidate-1",
+        ),
         candidateArtifacts: [
-          {
-            name: "release-candidate-1",
-            uri: "artifact://release-candidate-1",
-          },
+          releaseArtifact(
+            "release-candidate-1",
+            "artifact://release-candidate-1",
+          ),
         ],
         contextPackVersion: 1,
         evidenceRefs: [
@@ -387,6 +404,168 @@ test("current passing gates move a release-required Mission into human approval"
       ],
       latestEventType: "VALIDATION_PASSED",
     },
+  );
+});
+
+test("release validation fails closed when a candidate has no inspectable detail", () => {
+  const orchestrator = createHarness();
+  const { created, execute } = createReleaseMissionAtApproval(orchestrator, {
+    artifact: {
+      name: "opaque-release-candidate",
+      uri: "artifact://opaque-release-candidate",
+    },
+    stopBeforeValidation: true,
+  });
+
+  assert.throws(
+    () =>
+      execute(
+        "PASS_VALIDATION",
+        { validation: { summary: "Release acceptance suite passed" } },
+        "Pass release validation",
+        ["evidence://validation-release-1"],
+      ),
+    /release-required candidate Artifacts must include inline diff, patch, or content before approval/,
+  );
+
+  const mission = orchestrator.getMission(created.id);
+  assert.equal(mission.status, "VALIDATING");
+  assert.equal(mission.events.at(-1).type, "REVIEW_PASSED");
+
+  const referenceOrchestrator = createHarness();
+  const { execute: executeReference } = createReleaseMissionAtApproval(
+    referenceOrchestrator,
+    {
+      artifact: {
+        name: "reference-only-release-candidate",
+        uri: "artifact://reference-only-release-candidate",
+        diff: "src/release-candidate.diff",
+      },
+      stopBeforeValidation: true,
+    },
+  );
+  assert.throws(
+    () =>
+      executeReference(
+        "PASS_VALIDATION",
+        { validation: { summary: "Release acceptance suite passed" } },
+        "Pass release validation with a reference-only diff",
+        ["evidence://validation-release-1"],
+      ),
+    /release-required candidate Artifacts must include inline diff, patch, or content before approval/,
+  );
+});
+
+test("passing release gates reject explicit failed outcomes and reused Evidence", () => {
+  const reviewOrchestrator = createHarness();
+  const { created: reviewMission, execute: executeReview } =
+    createReleaseMissionAtApproval(reviewOrchestrator, {
+      stopBeforeReview: true,
+    });
+
+  assert.throws(
+    () =>
+      executeReview(
+        "PASS_REVIEW",
+        { review: { summary: "Review failed", outcome: "FAILED" } },
+        "Attempt to pass a failed review",
+        ["evidence://review-release-1"],
+      ),
+    /non-passing review outcome/,
+  );
+  assert.throws(
+    () =>
+      executeReview(
+        "PASS_REVIEW",
+        {
+          review: {
+            summary: "Review failed",
+            details: { outcome: "FAILED" },
+          },
+        },
+        "Attempt to pass a nested failed review",
+        ["evidence://review-release-1b"],
+      ),
+    /non-passing review details.outcome/,
+  );
+  assert.equal(reviewOrchestrator.getMission(reviewMission.id).status, "IN_REVIEW");
+
+  const validationOrchestrator = createHarness();
+  const { created: validationMission, execute: executeValidation } =
+    createReleaseMissionAtApproval(validationOrchestrator, {
+      stopBeforeValidation: true,
+    });
+  assert.throws(
+    () =>
+      executeValidation(
+        "PASS_VALIDATION",
+        { validation: { summary: "Validation failed", outcome: "FAILED" } },
+        "Attempt to pass failed validation",
+        ["evidence://validation-release-1"],
+      ),
+    /non-passing validation outcome/,
+  );
+  assert.throws(
+    () =>
+      executeValidation(
+        "PASS_VALIDATION",
+        {
+          validation: {
+            summary: "Validation failed",
+            details: { status: "FAILED" },
+          },
+        },
+        "Attempt to pass nested failed validation",
+        ["evidence://validation-release-1b"],
+      ),
+    /non-passing validation details.status/,
+  );
+  assert.equal(
+    validationOrchestrator.getMission(validationMission.id).status,
+    "VALIDATING",
+  );
+
+  const duplicateOrchestrator = createHarness();
+  const { created: duplicateMission, execute: executeDuplicate } =
+    createReleaseMissionAtApproval(duplicateOrchestrator, {
+      stopBeforeReview: true,
+    });
+  assert.throws(
+    () =>
+      executeDuplicate(
+        "PASS_REVIEW",
+        { review: { summary: "Independent review passed" } },
+        "Attempt to reuse Artifact Evidence for review",
+        ["evidence://artifact-release-1"],
+      ),
+    /Evidence refs distinct from earlier release gates/,
+  );
+  assert.equal(
+    duplicateOrchestrator.getMission(duplicateMission.id).status,
+    "IN_REVIEW",
+  );
+
+  const validationDuplicateOrchestrator = createHarness();
+  const {
+    created: validationDuplicateMission,
+    execute: executeValidationDuplicate,
+  } = createReleaseMissionAtApproval(validationDuplicateOrchestrator, {
+    stopBeforeValidation: true,
+  });
+  assert.throws(
+    () =>
+      executeValidationDuplicate(
+        "PASS_VALIDATION",
+        { validation: { summary: "Validation passed" } },
+        "Attempt to reuse Review Evidence for validation",
+        ["evidence://review-release-1"],
+      ),
+    /Evidence refs distinct from earlier release gates/,
+  );
+  assert.equal(
+    validationDuplicateOrchestrator.getMission(validationDuplicateMission.id)
+      .status,
+    "VALIDATING",
   );
 });
 
@@ -424,15 +603,15 @@ test("authorized human approval records the exact candidate without releasing it
       approval: {
         decision: "APPROVED",
         summary: "Approve this exact candidate for release",
-        candidate: {
-          name: "release-candidate-1",
-          uri: "artifact://release-candidate-1",
-        },
+        candidate: releaseArtifact(
+          "release-candidate-1",
+          "artifact://release-candidate-1",
+        ),
         candidateArtifacts: [
-          {
-            name: "release-candidate-1",
-            uri: "artifact://release-candidate-1",
-          },
+          releaseArtifact(
+            "release-candidate-1",
+            "artifact://release-candidate-1",
+          ),
         ],
         contextPackVersion: 1,
         evidenceRefs: [
@@ -468,15 +647,15 @@ test("authorized human approval records the exact candidate without releasing it
           approval: {
             decision: "APPROVED",
             summary: "Approve this exact candidate for release",
-            candidate: {
-              name: "release-candidate-1",
-              uri: "artifact://release-candidate-1",
-            },
+            candidate: releaseArtifact(
+              "release-candidate-1",
+              "artifact://release-candidate-1",
+            ),
             candidateArtifacts: [
-              {
-                name: "release-candidate-1",
-                uri: "artifact://release-candidate-1",
-              },
+              releaseArtifact(
+                "release-candidate-1",
+                "artifact://release-candidate-1",
+              ),
             ],
             contextPackVersion: 1,
             evidenceRefs: [
@@ -497,15 +676,15 @@ test("authorized human approval records the exact candidate without releasing it
       replayedApproval: {
         decision: "APPROVED",
         summary: "Approve this exact candidate for release",
-        candidate: {
-          name: "release-candidate-1",
-          uri: "artifact://release-candidate-1",
-        },
+        candidate: releaseArtifact(
+          "release-candidate-1",
+          "artifact://release-candidate-1",
+        ),
         candidateArtifacts: [
-          {
-            name: "release-candidate-1",
-            uri: "artifact://release-candidate-1",
-          },
+          releaseArtifact(
+            "release-candidate-1",
+            "artifact://release-candidate-1",
+          ),
         ],
         contextPackVersion: 1,
         evidenceRefs: [
@@ -537,14 +716,8 @@ test("release approval snapshots every Artifact in a connected candidate set", a
           occurredAt: "2026-07-30T13:31:00.000Z",
           summary: "Submitted application and migration Artifacts",
           artifacts: [
-            {
-              name: "application",
-              uri: "artifact://release/application",
-            },
-            {
-              name: "migration",
-              uri: "artifact://release/migration",
-            },
+            releaseArtifact("application", "artifact://release/application"),
+            releaseArtifact("migration", "artifact://release/migration"),
           ],
           evidence: [
             {
@@ -610,29 +783,17 @@ test("release approval snapshots every Artifact in a connected candidate set", a
     },
     {
       readinessArtifacts: [
-        {
-          name: "application",
-          uri: "artifact://release/application",
-        },
-        {
-          name: "migration",
-          uri: "artifact://release/migration",
-        },
+        releaseArtifact("application", "artifact://release/application"),
+        releaseArtifact("migration", "artifact://release/migration"),
       ],
       approvalArtifacts: [
-        {
-          name: "application",
-          uri: "artifact://release/application",
-        },
-        {
-          name: "migration",
-          uri: "artifact://release/migration",
-        },
+        releaseArtifact("application", "artifact://release/application"),
+        releaseArtifact("migration", "artifact://release/migration"),
       ],
-      primaryCandidate: {
-        name: "application",
-        uri: "artifact://release/application",
-      },
+      primaryCandidate: releaseArtifact(
+        "application",
+        "artifact://release/application",
+      ),
     },
   );
 });
@@ -666,15 +827,15 @@ test("authorized human rejection returns the exact release candidate for correct
       approval: {
         decision: "REJECTED",
         summary: "Rollback evidence needs more detail",
-        candidate: {
-          name: "release-candidate-1",
-          uri: "artifact://release-candidate-1",
-        },
+        candidate: releaseArtifact(
+          "release-candidate-1",
+          "artifact://release-candidate-1",
+        ),
         candidateArtifacts: [
-          {
-            name: "release-candidate-1",
-            uri: "artifact://release-candidate-1",
-          },
+          releaseArtifact(
+            "release-candidate-1",
+            "artifact://release-candidate-1",
+          ),
         ],
         contextPackVersion: 1,
         evidenceRefs: [
@@ -734,10 +895,10 @@ test("approval correction requires a regenerated candidate and current gate Evid
   execute(
     "SUBMIT_ARTIFACT",
     {
-      artifact: {
-        name: "release-candidate-2",
-        uri: "artifact://release-candidate-2",
-      },
+      artifact: releaseArtifact(
+        "release-candidate-2",
+        "artifact://release-candidate-2",
+      ),
     },
     "Submit regenerated release candidate",
     ["evidence://artifact-release-2"],
@@ -781,15 +942,15 @@ test("approval correction requires a regenerated candidate and current gate Evid
       status: "APPROVAL_REQUIRED",
       approval: null,
       releaseReadiness: {
-        candidate: {
-          name: "release-candidate-2",
-          uri: "artifact://release-candidate-2",
-        },
+        candidate: releaseArtifact(
+          "release-candidate-2",
+          "artifact://release-candidate-2",
+        ),
         candidateArtifacts: [
-          {
-            name: "release-candidate-2",
-            uri: "artifact://release-candidate-2",
-          },
+          releaseArtifact(
+            "release-candidate-2",
+            "artifact://release-candidate-2",
+          ),
         ],
         contextPackVersion: 1,
         evidenceRefs: [
