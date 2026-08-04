@@ -5,6 +5,7 @@ import {
   createMissionOrchestrator,
 } from "./mission-orchestrator.js";
 import {
+  deriveApprovalRoomModel,
   deriveCommandDeckModel,
   deriveMissionFlowModel,
 } from "./mission-presenter.js";
@@ -26,6 +27,10 @@ const orchestrator = createMissionOrchestrator({
 });
 
 const app = document.querySelector("#app");
+
+function localEventRef(mission, kind) {
+  return `local://missions/${mission.id}/context-${mission.contextPackVersion}/${kind}-event-${mission.events.length + 1}`;
+}
 
 const nextSteps = {
   capture_context: {
@@ -112,11 +117,11 @@ const nextSteps = {
     reason: "Submitted the local tracer-bullet artifact",
     payload: (mission) => ({
       artifact: {
-        name: "Mission Control tracer bullet",
-        uri: `local://missions/${mission.id}/artifact`,
+        name: `Mission Control candidate ${mission.events.length + 1}`,
+        uri: localEventRef(mission, "artifact"),
       },
     }),
-    evidenceRefs: ["local://evidence/artifact"],
+    evidenceRefs: (mission) => [localEventRef(mission, "artifact-evidence")],
   },
   pass_review: {
     label: "Pass Review",
@@ -126,7 +131,21 @@ const nextSteps = {
     payload: () => ({
       review: { summary: "No material correctness or security findings" },
     }),
-    evidenceRefs: ["local://evidence/review"],
+    evidenceRefs: (mission) => [localEventRef(mission, "review-pass")],
+  },
+  reject_review: {
+    label: "Request Review Changes",
+    eyebrow: "Review Gate",
+    description:
+      "Record a distinct review failure and return the candidate to correction.",
+    reason: "Independent review requested an idempotency correction",
+    payload: () => ({
+      review: {
+        summary: "Review found a correction that must be resolved",
+        findings: ["Regenerate the affected Artifact and Evidence"],
+      },
+    }),
+    evidenceRefs: (mission) => [localEventRef(mission, "review-failure")],
   },
   pass_validation: {
     label: "Pass Validation",
@@ -136,7 +155,95 @@ const nextSteps = {
     payload: () => ({
       validation: { summary: "Lifecycle and replay acceptance checks passed" },
     }),
-    evidenceRefs: ["local://evidence/validation"],
+    evidenceRefs: (mission) => [localEventRef(mission, "validation-pass")],
+  },
+  fail_validation: {
+    label: "Fail Validation",
+    eyebrow: "Validation Gate",
+    description:
+      "Record a validation-specific failure and return the candidate to correction.",
+    reason: "Acceptance validation found a replay regression",
+    payload: () => ({
+      validation: {
+        summary: "Validation found a correction that must be resolved",
+        failures: ["Regenerate the candidate against current acceptance checks"],
+      },
+    }),
+    evidenceRefs: (mission) => [
+      localEventRef(mission, "validation-failure"),
+    ],
+  },
+  start_correction: {
+    label: "Start Correction",
+    eyebrow: "Correction Run",
+    description:
+      "Return the requested changes to the assigned role and invalidate the prior candidate.",
+    reason: "Returned the requested changes to the assigned role",
+    payload: (mission) => ({
+      run: {
+        id: `correction:${mission.id}:event-${mission.events.length + 1}`,
+        agentRole: mission.agent?.roleId ?? "terra_builder",
+        mode: "local-correction",
+      },
+    }),
+    evidenceRefs: [],
+  },
+  revise_context: {
+    label: "Revise Context",
+    eyebrow: "Context Pack",
+    description:
+      "Create a new material Context Pack version and invalidate downstream candidate Evidence.",
+    reason: "Material Context changed; downstream Evidence was invalidated",
+    payload: (mission) => ({
+      context: {
+        summary: `Revised Context Pack v${mission.contextPackVersion + 1} for ${mission.brief.goal}`,
+        sourceRefs: [
+          ...(mission.context?.sourceRefs ?? []),
+          localEventRef(mission, "context-revision"),
+        ],
+      },
+    }),
+    evidenceRefs: [],
+  },
+  block_mission: {
+    label: "Block Mission",
+    eyebrow: "Control State",
+    description:
+      "Pause at the current safe state while preserving the blocker and recovery requirement.",
+    reason: "Mission owner paused work at the current safe state",
+    payload: () => ({
+      block: {
+        blocker: "Required owner input is not yet available",
+        attemptedAlternatives: [
+          "Reviewed the current Brief and Context Pack",
+          "Kept the active gate unchanged",
+        ],
+        requiredAuthorityOrInput: "Mission owner input",
+      },
+    }),
+    evidenceRefs: [],
+  },
+  resume_mission: {
+    label: "Resume Mission",
+    eyebrow: "Control State",
+    description:
+      "Resume exactly at the recorded prior safe state without skipping a gate.",
+    reason: "Mission owner supplied the required input",
+    payload: () => ({
+      resumption: { summary: "Required owner input is now available" },
+    }),
+    evidenceRefs: [],
+  },
+  cancel_mission: {
+    label: "Cancel Mission",
+    eyebrow: "Terminal Control",
+    description:
+      "End this Mission without deleting its immutable event history.",
+    reason: "Mission owner cancelled the local Mission",
+    payload: () => ({
+      cancellation: { summary: "Mission is no longer required" },
+    }),
+    evidenceRefs: [],
   },
   capture_learning: {
     label: "Capture Learning",
@@ -148,7 +255,7 @@ const nextSteps = {
         summary: "Keep Mission Orchestrator as the single behavioral seam",
       },
     }),
-    evidenceRefs: ["local://evidence/learning"],
+    evidenceRefs: (mission) => [localEventRef(mission, "learning")],
   },
   complete_no_release: {
     label: "Accept No-Release Outcome",
@@ -158,11 +265,15 @@ const nextSteps = {
     payload: () => ({
       completion: { summary: "Accepted locally without release" },
     }),
-    evidenceRefs: ["local://evidence/completion"],
+    evidenceRefs: (mission) => [localEventRef(mission, "completion")],
   },
 };
 
-let activeMissionId = new URL(window.location.href).searchParams.get("mission");
+const initialUrl = new URL(window.location.href);
+let activeMissionId = initialUrl.searchParams.get("mission");
+let activeView =
+  initialUrl.searchParams.get("view") ??
+  (activeMissionId ? "detail" : "overview");
 let notice = null;
 let historyReadError = null;
 
@@ -186,13 +297,26 @@ function humanize(value) {
   return value.toLowerCase().replaceAll("_", " ");
 }
 
-function setActiveMission(missionId) {
+function isApprovalRouteAvailable(mission) {
+  return (
+    mission?.brief.releaseRequired &&
+    ["APPROVAL_REQUIRED", "READY_TO_RELEASE"].includes(mission.status)
+  );
+}
+
+function setActiveMission(
+  missionId,
+  view = missionId ? "detail" : "overview",
+) {
   activeMissionId = missionId;
+  activeView = view;
   const url = new URL(window.location.href);
   if (missionId) {
     url.searchParams.set("mission", missionId);
+    url.searchParams.set("view", view);
   } else {
     url.searchParams.delete("mission");
+    url.searchParams.delete("view");
   }
   window.history.pushState({}, "", url);
   render();
@@ -212,6 +336,10 @@ function getMissions() {
 function renderShell(content, view) {
   const missions = getMissions();
   const commandDeck = deriveCommandDeckModel(missions);
+  const selectedMission = missions.find(
+    (mission) => mission.id === activeMissionId,
+  );
+  const approvalAvailable = isApprovalRouteAvailable(selectedMission);
 
   app.innerHTML = `
     <div class="app-shell">
@@ -233,9 +361,9 @@ function renderShell(content, view) {
             <span class="nav-icon" aria-hidden="true">◎</span>
             <span>Mission Flow</span>
           </button>
-          <button class="nav-item" type="button" aria-disabled="true" title="Available after Ticket 03">
+          <button class="nav-item ${view === "approval" ? "is-active" : ""}" type="button" data-route="approval" ${view === "approval" ? 'aria-current="page"' : ""} ${approvalAvailable ? "" : 'disabled title="Available when the selected release Mission requires approval"'}>
             <span class="nav-icon" aria-hidden="true">◇</span>
-            <span class="nav-copy"><span>Approval Room</span><small>Ticket 03</small></span>
+            <span class="nav-copy"><span>Approval Room</span><small>${approvalAvailable ? "Human decision" : "No decision pending"}</small></span>
           </button>
         </nav>
 
@@ -314,7 +442,7 @@ function renderOverview() {
         </div>
         <div class="heading-meta command-mode">
           <span>Operating mode</span>
-          <strong>Local · No release</strong>
+          <strong>Local · ${missions.some((mission) => mission.brief.releaseRequired) ? "Human-gated release" : "No release"}</strong>
           <small>Mission Orchestrator v1</small>
         </div>
       </section>
@@ -426,6 +554,7 @@ function renderTeamCard(role) {
 
 function renderMissionCard(mission) {
   const isComplete = mission.status === "COMPLETED";
+  const statusClass = `status-${mission.status.toLowerCase().replaceAll("_", "-")}`;
   const nextActionLabel = mission.nextAction
     ? nextSteps[mission.nextAction]?.label ?? humanize(mission.nextAction)
     : "No action required";
@@ -435,7 +564,7 @@ function renderMissionCard(mission) {
       <button type="button" data-mission-id="${escapeHtml(mission.id)}" aria-label="Open Mission: ${escapeHtml(mission.goal)}">
         <div class="mission-card-top">
           <span class="risk-badge risk-${escapeHtml(mission.risk)}">${escapeHtml(mission.risk)} risk</span>
-          <span class="status-badge ${isComplete ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
+          <span class="status-badge ${statusClass} ${isComplete ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
         </div>
         <h3>${escapeHtml(mission.goal)}</h3>
         <p>${escapeHtml(mission.scope)}</p>
@@ -492,20 +621,38 @@ function renderSignal(signal) {
 
 function renderMissionDetail(mission) {
   const flow = deriveMissionFlowModel(mission);
-  const nextAction = flow.nextAction;
+  const approvalRouteAvailable = isApprovalRouteAvailable(mission);
+  const missionActions = mission.allowedActions.filter(
+    (action) =>
+      !["approve_release", "reject_release"].includes(action),
+  );
+  const nextAction = approvalRouteAvailable
+    ? null
+    : (missionActions[0] ?? null);
   const step = nextAction ? nextSteps[nextAction] : null;
+  const secondaryActions = missionActions
+    .slice(approvalRouteAvailable ? 0 : 1)
+    .map((action) => ({ action, step: nextSteps[action] }))
+    .filter((item) => item.step);
   const latestEvent = mission.events.at(-1);
+  const statusClass = `status-${mission.status.toLowerCase().replaceAll("_", "-")}`;
+  const isControlState = [
+    "changes-requested",
+    "blocked",
+    "resumed",
+    "cancelled",
+  ].includes(flow.visualState.kind);
 
   renderShell(
     `
-      <section class="mission-hero">
+      <section class="mission-hero state-${escapeHtml(flow.visualState.kind)}">
         <div class="mission-hero-copy">
           <button class="back-link" type="button" data-route="overview">← Overview</button>
           <p class="eyebrow">${escapeHtml(mission.id)} · EXECUTION FLOW</p>
           <h1 id="page-title" tabindex="-1">${escapeHtml(mission.brief.goal)}</h1>
           <p>${escapeHtml(mission.brief.scope)}</p>
           <div class="mission-hero-meta">
-            <span class="status-badge ${mission.status === "COMPLETED" ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
+            <span class="status-badge ${statusClass} ${mission.status === "COMPLETED" ? "status-complete" : ""}"><span></span>${escapeHtml(humanize(mission.status))}</span>
             <span>Context Pack v${mission.contextPackVersion}</span>
             <span>${mission.events.length} events</span>
             <span>${flow.evidenceCount} Evidence refs</span>
@@ -519,6 +666,34 @@ function renderMissionDetail(mission) {
         </div>
       </section>
 
+      ${
+        isControlState
+          ? `
+            <section class="control-state-banner state-${escapeHtml(flow.visualState.kind)}" aria-labelledby="control-state-title">
+              <div class="control-state-mark" aria-hidden="true">${flow.visualState.kind === "cancelled" ? "×" : flow.visualState.kind === "resumed" ? "↺" : "!"}</div>
+              <div>
+                <p class="eyebrow">${escapeHtml(flow.visualState.source ? `${flow.visualState.source} CONTROL` : "MISSION CONTROL")}</p>
+                <h2 id="control-state-title">${escapeHtml(flow.visualState.label)}</h2>
+                <p>${escapeHtml(flow.visualState.summary)}</p>
+                <div class="control-state-meta">
+                  <span>Prior safe state <strong>${escapeHtml(humanize(flow.visualState.priorSafeState ?? "not applicable"))}</strong></span>
+                  ${
+                    mission.block
+                      ? `<span>Required input <strong>${escapeHtml(mission.block.requiredAuthorityOrInput)}</strong></span>`
+                      : ""
+                  }
+                  ${
+                    mission.changeRequest
+                      ? `<span>Failure Evidence <strong>${escapeHtml(mission.changeRequest.evidenceRefs.join(", "))}</strong></span>`
+                      : ""
+                  }
+                </div>
+              </div>
+            </section>
+          `
+          : ""
+      }
+
       <section class="flow-panel" aria-labelledby="flow-title">
         <div class="section-heading compact">
           <div>
@@ -531,7 +706,7 @@ function renderMissionDetail(mission) {
           ${flow.stages
             .map(
               (stage) => `
-                <li class="is-${stage.state}" ${stage.state === "current" ? 'aria-current="step"' : ""}>
+                <li class="is-${stage.state}" ${stage.state !== "done" && stage.state !== "locked" ? 'aria-current="step"' : ""}>
                   <span class="stage-dot">${stage.state === "done" ? "✓" : String(stage.number).padStart(2, "0")}</span>
                   <strong>${escapeHtml(stage.label)}</strong>
                   <small>${escapeHtml(humanize(stage.status))}</small>
@@ -558,7 +733,43 @@ function renderMissionDetail(mission) {
       <div class="detail-grid">
         <div class="detail-main">
           ${
-            step
+            approvalRouteAvailable
+              ? `
+                <section class="action-card approval-entry-card" aria-labelledby="next-action-title">
+                  <div>
+                    <p class="eyebrow">HUMAN RELEASE GATE</p>
+                    <h2 id="next-action-title">${mission.status === "APPROVAL_REQUIRED" ? "Review the exact release candidate" : "Release readiness recorded"}</h2>
+                    <p>${mission.status === "APPROVAL_REQUIRED" ? "Open the Review Ledger to inspect current Evidence, residual risk, external action, and rollback commitment before deciding." : "Inspect the immutable human decision. No release or deployment has occurred."}</p>
+                  </div>
+                  <button class="primary-button action-button" type="button" data-route="approval">
+                    Open Approval Room <span aria-hidden="true">→</span>
+                  </button>
+                </section>
+                ${
+                  secondaryActions.length
+                    ? `
+                      <section class="control-actions-panel" aria-labelledby="control-actions-title">
+                        <div>
+                          <p class="eyebrow">OTHER ALLOWED ACTIONS</p>
+                          <h2 id="control-actions-title">Mission controls</h2>
+                        </div>
+                        <div class="control-actions">
+                          ${secondaryActions
+                            .map(
+                              ({ action, step: secondaryStep }) => `
+                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" title="${escapeHtml(secondaryStep.description)}">
+                                  ${escapeHtml(secondaryStep.label)}
+                                </button>
+                              `,
+                            )
+                            .join("")}
+                        </div>
+                      </section>
+                    `
+                    : ""
+                }
+              `
+              : step
               ? `
                 <section class="action-card" aria-labelledby="next-action-title">
                   <div>
@@ -570,8 +781,42 @@ function renderMissionDetail(mission) {
                     ${escapeHtml(step.label)} <span aria-hidden="true">→</span>
                   </button>
                 </section>
+                ${
+                  secondaryActions.length
+                    ? `
+                      <section class="control-actions-panel" aria-labelledby="control-actions-title">
+                        <div>
+                          <p class="eyebrow">OTHER ALLOWED ACTIONS</p>
+                          <h2 id="control-actions-title">Mission controls</h2>
+                        </div>
+                        <div class="control-actions">
+                          ${secondaryActions
+                            .map(
+                              ({ action, step: secondaryStep }) => `
+                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" title="${escapeHtml(secondaryStep.description)}">
+                                  ${escapeHtml(secondaryStep.label)}
+                                </button>
+                              `,
+                            )
+                            .join("")}
+                        </div>
+                      </section>
+                    `
+                    : ""
+                }
               `
-              : `
+              : mission.status === "CANCELLED"
+                ? `
+                  <section class="completion-card cancellation-card" aria-labelledby="complete-title">
+                    <span class="completion-mark" aria-hidden="true">×</span>
+                    <div>
+                      <p class="eyebrow">TERMINAL CONTROL</p>
+                      <h2 id="complete-title">Mission cancelled.</h2>
+                      <p>${escapeHtml(mission.cancellation.summary)} Its immutable history remains available below.</p>
+                    </div>
+                  </section>
+                `
+                : `
                 <section class="completion-card" aria-labelledby="complete-title">
                   <span class="completion-mark" aria-hidden="true">✓</span>
                   <div>
@@ -580,7 +825,7 @@ function renderMissionDetail(mission) {
                     <p>The owner accepted the outcome. External mutations remain at zero.</p>
                   </div>
                 </section>
-              `
+                `
           }
 
           <section class="ledger-panel" aria-labelledby="ledger-title">
@@ -612,6 +857,16 @@ function renderMissionDetail(mission) {
           </div>
           ${renderBriefField("Mutation authority", mission.brief.mutationAuthority)}
           ${renderBriefField("Release authority", mission.brief.releaseAuthority)}
+          ${renderBriefField("Release authorized", mission.brief.releaseAuthorized === true ? "Explicitly authorized" : "Not authorized")}
+          ${
+            mission.brief.releaseRequired
+              ? `
+                ${renderBriefField("Residual risk", mission.brief.releasePlan.residualRisk)}
+                ${renderBriefField("External action", mission.brief.releasePlan.intendedExternalAction)}
+                ${renderBriefField("Rollback", mission.brief.releasePlan.rollbackCommitment)}
+              `
+              : ""
+          }
           <div class="brief-version">
             <span>Last event</span>
             <strong>#${latestEvent.sequence} · ${escapeHtml(formatDate(latestEvent.occurredAt))}</strong>
@@ -620,6 +875,151 @@ function renderMissionDetail(mission) {
       </div>
     `,
     "detail",
+  );
+}
+
+function renderApprovalRoom(mission) {
+  const model = deriveApprovalRoomModel(mission);
+  const isPending = model.status === "APPROVAL_REQUIRED";
+  const decisionHistory =
+    model.decisionHistory.length === 0
+      ? `<li class="approval-history-empty">No human decision has been recorded for this candidate.</li>`
+      : [...model.decisionHistory]
+          .reverse()
+          .map(
+            (decision) => `
+              <li>
+                <span class="decision-sequence">${String(decision.sequence).padStart(2, "0")}</span>
+                <div>
+                  <strong>${escapeHtml(humanize(decision.type))}</strong>
+                  <p>${escapeHtml(decision.summary)}</p>
+                  <small>${escapeHtml(decision.actor)} · ${escapeHtml(decision.reason)}</small>
+                </div>
+                <time datetime="${escapeHtml(decision.occurredAt)}">${escapeHtml(formatDate(decision.occurredAt))}</time>
+              </li>
+            `,
+          )
+          .join("");
+
+  renderShell(
+    `
+      <section class="approval-hero">
+        <div>
+          <button class="back-link" type="button" data-route="detail">← Mission Flow</button>
+          <p class="eyebrow">${escapeHtml(mission.id)} · REVIEW LEDGER</p>
+          <h1 id="page-title" tabindex="-1">${isPending ? "Release decision required" : "Release readiness recorded"}</h1>
+          <p>${escapeHtml(model.goal)}</p>
+        </div>
+        <div class="approval-status ${isPending ? "is-pending" : "is-approved"}">
+          <span>${isPending ? "Awaiting" : "Approved"}</span>
+          <strong>${escapeHtml(humanize(model.status))}</strong>
+          <small>No external action executed</small>
+        </div>
+      </section>
+
+      <section class="approval-summary-grid" aria-label="Release decision summary">
+        <article class="approval-candidate-card">
+          <p class="eyebrow">EXACT CANDIDATE</p>
+          <h2>${escapeHtml(model.candidate.name ?? "Release candidate")}</h2>
+          <ul class="approval-artifact-set" aria-label="Candidate Artifact set">
+            ${model.candidateArtifacts
+              .map(
+                (artifact, index) => `
+                  <li>
+                    <span>${index === 0 ? "Primary" : `Artifact ${index + 1}`}</span>
+                    <strong>${escapeHtml(artifact.name ?? `Candidate Artifact ${index + 1}`)}</strong>
+                    <code>${escapeHtml(artifact.uri ?? artifact.path ?? artifact.ref ?? artifact.id)}</code>
+                  </li>
+                `,
+              )
+              .join("")}
+          </ul>
+          <div class="candidate-meta">
+            <span>Artifact set <strong>${model.candidateArtifacts.length}</strong></span>
+            <span>Context Pack <strong>v${model.contextPackVersion}</strong></span>
+            <span>Authority <strong>${escapeHtml(model.releaseAuthority)}</strong></span>
+          </div>
+        </article>
+
+        <article class="approval-evidence-card">
+          <p class="eyebrow">CURRENT PASSING EVIDENCE</p>
+          <h2>${model.evidence.length} references</h2>
+          <ul>
+            ${model.evidence.map((reference) => `<li><span aria-hidden="true">✓</span><code>${escapeHtml(reference)}</code></li>`).join("")}
+          </ul>
+        </article>
+      </section>
+
+      <section class="release-commitment-grid" aria-label="Release commitments">
+        <article>
+          <span class="commitment-index">01</span>
+          <p class="eyebrow">RESIDUAL RISK</p>
+          <h2>What can still go wrong</h2>
+          <p>${escapeHtml(model.residualRisk)}</p>
+        </article>
+        <article>
+          <span class="commitment-index">02</span>
+          <p class="eyebrow">INTENDED EXTERNAL ACTION</p>
+          <h2>What approval permits next</h2>
+          <p>${escapeHtml(model.intendedExternalAction)}</p>
+        </article>
+        <article>
+          <span class="commitment-index">03</span>
+          <p class="eyebrow">ROLLBACK COMMITMENT</p>
+          <h2>How failure will be reversed</h2>
+          <p>${escapeHtml(model.rollbackCommitment)}</p>
+        </article>
+      </section>
+
+      <div class="approval-ledger-grid">
+        <section class="ledger-panel approval-decision-panel" aria-labelledby="approval-decision-title">
+          <div class="section-heading compact">
+            <div>
+              <p class="eyebrow">HUMAN AUTHORITY</p>
+              <h2 id="approval-decision-title">${isPending ? "Record a bounded decision" : "Decision is immutable"}</h2>
+            </div>
+            <span class="record-count">${escapeHtml(model.releaseAuthority)}</span>
+          </div>
+          ${
+            isPending
+              ? `
+                <form id="approval-decision-form" class="approval-form">
+                  <label class="field">
+                    <span>Decision summary</span>
+                    <textarea name="approvalSummary" required rows="4" placeholder="Explain why this exact candidate is approved or rejected."></textarea>
+                  </label>
+                  <p class="approval-boundary">Approval updates Mission state only. It does not commit, push, open a pull request, release, or deploy.</p>
+                  <div class="approval-actions">
+                    <button class="secondary-button danger-button" type="submit" name="decision" value="reject">Reject and request changes</button>
+                    <button class="primary-button" type="submit" name="decision" value="approve">Approve release readiness</button>
+                  </div>
+                </form>
+              `
+              : `
+                <div class="approval-recorded">
+                  <span aria-hidden="true">✓</span>
+                  <div>
+                    <strong>Ready to release—not released.</strong>
+                    <p>The human decision is recorded below. A separate release capability and authority are still required.</p>
+                  </div>
+                </div>
+              `
+          }
+        </section>
+
+        <section class="ledger-panel" aria-labelledby="decision-history-title">
+          <div class="section-heading compact">
+            <div>
+              <p class="eyebrow">IMMUTABLE DECISION HISTORY</p>
+              <h2 id="decision-history-title">Approval events</h2>
+            </div>
+            <span class="record-count">${model.decisionHistory.length} recorded</span>
+          </div>
+          <ol class="approval-history">${decisionHistory}</ol>
+        </section>
+      </div>
+    `,
+    "approval",
   );
 }
 
@@ -649,6 +1049,11 @@ function renderEvent(event) {
           <span>${escapeHtml(event.actor || "system")}</span>
         </div>
         <p>${escapeHtml(event.reason || "No reason recorded")}</p>
+        ${
+          event.data?.approval?.summary
+            ? `<p class="event-decision-rationale"><strong>Human rationale:</strong> ${escapeHtml(event.data.approval.summary)}</p>`
+            : ""
+        }
         ${
           event.evidenceRefs.length
             ? `<ul class="evidence-list">${event.evidenceRefs.map((ref) => `<li>${escapeHtml(ref)}</li>`).join("")}</ul>`
@@ -724,11 +1129,31 @@ function renderBriefDialog() {
             <span>Release requirement</span>
             <select name="releaseRequired" required>
               <option value="false" selected>No release — local completion</option>
+              <option value="true">Human approval required</option>
             </select>
           </label>
           <label class="field">
             <span>Release authority</span>
-            <input name="releaseAuthority" required value="Mission owner" />
+            <input name="releaseAuthority" required value="mission-owner" />
+          </label>
+          <label class="field">
+            <span>Release authorization</span>
+            <select name="releaseAuthorized" required>
+              <option value="false" selected>Not authorized</option>
+              <option value="true">Explicitly authorized</option>
+            </select>
+          </label>
+          <label class="field span-2">
+            <span>Residual risk if release is required</span>
+            <input name="residualRisk" value="A failed release may require rollback" />
+          </label>
+          <label class="field">
+            <span>Intended external action</span>
+            <textarea name="intendedExternalAction" rows="3">Deploy only the exact approved candidate</textarea>
+          </label>
+          <label class="field">
+            <span>Rollback commitment</span>
+            <textarea name="rollbackCommitment" rows="3">Restore the previous immutable release</textarea>
           </label>
         </div>
 
@@ -750,8 +1175,20 @@ function wireShellEvents() {
   });
   document.querySelectorAll("[data-route='detail']").forEach((button) => {
     button.addEventListener("click", () => {
-      const mission = getMissions()[0];
-      if (mission) setActiveMission(mission.id);
+      const mission =
+        getMissions().find((item) => item.id === activeMissionId) ??
+        getMissions()[0];
+      if (mission) setActiveMission(mission.id, "detail");
+    });
+  });
+  document.querySelectorAll("[data-route='approval']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mission = getMissions().find(
+        (item) => item.id === activeMissionId,
+      );
+      if (isApprovalRouteAvailable(mission)) {
+        setActiveMission(mission.id, "approval");
+      }
     });
   });
   document.querySelectorAll("[data-mission-id]").forEach((button) => {
@@ -773,11 +1210,62 @@ function wireShellEvents() {
   document
     .querySelector("#brief-form")
     .addEventListener("submit", handleCreateMission);
+  document
+    .querySelector("#approval-decision-form")
+    ?.addEventListener("submit", handleApprovalDecision);
 
-  document.querySelector("[data-run-action]")?.addEventListener("click", (event) => {
-    const action = event.currentTarget.dataset.runAction;
-    advanceMission(action);
+  document.querySelectorAll("[data-run-action]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      const action = event.currentTarget.dataset.runAction;
+      advanceMission(action);
+    });
   });
+}
+
+async function handleApprovalDecision(event) {
+  event.preventDefault();
+  const mission = orchestrator.getMission(activeMissionId);
+  const summary = String(
+    new FormData(event.currentTarget).get("approvalSummary"),
+  ).trim();
+  const decision = event.submitter?.value;
+  if (!["approve", "reject"].includes(decision)) {
+    notice = {
+      kind: "error",
+      message: "Choose approve or reject before recording a decision.",
+    };
+    render();
+    return;
+  }
+  const action =
+    decision === "approve" ? "APPROVE_RELEASE" : "REJECT_RELEASE";
+
+  try {
+    const updated = await orchestrator.execute(mission.id, {
+      type: action,
+      payload: { approval: { summary } },
+      actor: mission.brief.releaseAuthority,
+      reason:
+        decision === "approve"
+          ? "Release authority approved the exact current candidate"
+          : "Release authority rejected the exact current candidate",
+      evidenceRefs: mission.releaseReadiness.evidenceRefs,
+    });
+    notice = {
+      kind: "success",
+      message:
+        decision === "approve"
+          ? "Release readiness approved. No external action was executed."
+          : "Release rejected and returned to changes requested.",
+    };
+    setActiveMission(
+      updated.id,
+      decision === "approve" ? "approval" : "detail",
+    );
+  } catch (error) {
+    notice = { kind: "error", message: error.message };
+    render();
+  }
 }
 
 async function handleCreateMission(event) {
@@ -790,6 +1278,7 @@ async function handleCreateMission(event) {
       .filter(Boolean);
 
   try {
+    const releaseRequired = form.get("releaseRequired") === "true";
     const mission = await createMissionWhenHistoryReadable(orchestrator, {
       brief: {
         goal: String(form.get("goal")).trim(),
@@ -798,8 +1287,24 @@ async function handleCreateMission(event) {
         constraints: lines("constraints"),
         risk: String(form.get("risk")),
         mutationAuthority: String(form.get("mutationAuthority")).trim(),
-        releaseRequired: form.get("releaseRequired") === "true",
+        releaseRequired,
+        releaseAuthorized:
+          releaseRequired &&
+          form.get("releaseAuthorized") === "true",
         releaseAuthority: String(form.get("releaseAuthority")).trim(),
+        ...(releaseRequired
+          ? {
+              releasePlan: {
+                residualRisk: String(form.get("residualRisk")).trim(),
+                intendedExternalAction: String(
+                  form.get("intendedExternalAction"),
+                ).trim(),
+                rollbackCommitment: String(
+                  form.get("rollbackCommitment"),
+                ).trim(),
+              },
+            }
+          : {}),
       },
       actor: "mission-owner",
       reason: "Mission owner submitted a complete local Brief",
@@ -817,8 +1322,20 @@ async function advanceMission(action) {
   const mission = orchestrator.getMission(activeMissionId);
   const step = nextSteps[action];
   if (!step) return;
+  if (
+    action === "cancel_mission" &&
+    !window.confirm(
+      "Cancel this Mission? The event history will remain readable, but cancellation is terminal.",
+    )
+  ) {
+    return;
+  }
 
   try {
+    const evidenceRefs =
+      typeof step.evidenceRefs === "function"
+        ? step.evidenceRefs(mission)
+        : step.evidenceRefs;
     const updated =
       action === "start_run" && agentRoutingConnected
         ? await orchestrator.dispatchAssignment(mission.id, {
@@ -826,12 +1343,19 @@ async function advanceMission(action) {
             actor: "mission-owner",
             reason: step.reason,
           })
+        : action === "start_correction" &&
+            agentRoutingConnected &&
+            mission.assignment
+          ? await orchestrator.dispatchCorrection(mission.id, {
+              actor: "mission-owner",
+              reason: step.reason,
+            })
         : await orchestrator.execute(mission.id, {
             type: MISSION_COMMAND_BY_ACTION[action],
             payload: step.payload(mission),
             actor: "mission-owner",
             reason: step.reason,
-            evidenceRefs: step.evidenceRefs,
+            evidenceRefs,
           });
     notice = {
       kind: "success",
@@ -866,14 +1390,27 @@ function render() {
   }
 
   if (mission) {
-    renderMissionDetail(mission);
+    if (
+      activeView === "approval" &&
+      isApprovalRouteAvailable(mission)
+    ) {
+      renderApprovalRoom(mission);
+    } else {
+      activeView = "detail";
+      renderMissionDetail(mission);
+    }
   } else {
+    activeView = "overview";
     renderOverview();
   }
 }
 
 window.addEventListener("popstate", () => {
-  activeMissionId = new URL(window.location.href).searchParams.get("mission");
+  const url = new URL(window.location.href);
+  activeMissionId = url.searchParams.get("mission");
+  activeView =
+    url.searchParams.get("view") ??
+    (activeMissionId ? "detail" : "overview");
   render();
   focusCurrentView();
 });

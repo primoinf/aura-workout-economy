@@ -7,9 +7,14 @@ export const LIFECYCLE_LABELS = Object.freeze({
   RUNNING: "Run",
   IN_REVIEW: "Review",
   VALIDATING: "Validation",
+  APPROVAL_REQUIRED: "Approval",
+  READY_TO_RELEASE: "Release ready",
   LEARNING: "Learning",
   READY_TO_COMPLETE: "Accept",
   COMPLETED: "Complete",
+  CHANGES_REQUESTED: "Changes requested",
+  BLOCKED: "Blocked",
+  CANCELLED: "Cancelled",
 });
 
 export const TEAM_ROLE_DIRECTORY = Object.freeze([
@@ -69,15 +74,106 @@ export const TEAM_ROLE_DIRECTORY = Object.freeze([
   }),
 ]);
 
-function lifecycleIndex(status) {
-  return MISSION_STATUS_ORDER.indexOf(status);
+function lifecycleOrder(mission) {
+  return mission.brief.releaseRequired
+    ? MISSION_STATUS_ORDER
+    : MISSION_STATUS_ORDER.filter(
+        (status) =>
+          !["APPROVAL_REQUIRED", "READY_TO_RELEASE"].includes(status),
+      );
 }
 
-function lifecycleCompletion(status) {
-  const index = lifecycleIndex(status);
+function lifecycleIndex(mission, status) {
+  return lifecycleOrder(mission).indexOf(status);
+}
+
+function lifecycleCompletion(mission, status) {
+  const order = lifecycleOrder(mission);
+  const index = order.indexOf(status);
   return index < 0
     ? 0
-    : Math.round(((index + 1) / MISSION_STATUS_ORDER.length) * 100);
+    : Math.round(((index + 1) / order.length) * 100);
+}
+
+function correctionAnchorStatus(mission) {
+  return (
+    {
+      REVIEW: "IN_REVIEW",
+      VALIDATION: "VALIDATING",
+      APPROVAL: "APPROVAL_REQUIRED",
+    }[mission.changeRequest?.source ?? mission.lastChangeRequest?.source] ??
+    "IN_REVIEW"
+  );
+}
+
+function deriveControlState(mission) {
+  const source =
+    mission.changeRequest?.source ?? mission.lastChangeRequest?.source ?? null;
+  const correctionAnchor = correctionAnchorStatus(mission);
+  const anchorForStatus = (status) =>
+    status === "CHANGES_REQUESTED" ? correctionAnchor : status;
+  if (mission.events.at(-1)?.type === "MISSION_RESUMED") {
+    return Object.freeze({
+      anchorStatus: anchorForStatus(mission.status),
+      kind: "resumed",
+      label: "Resumed",
+      summary: mission.resume.summary,
+      source,
+      priorSafeState: mission.resume.toStatus,
+    });
+  }
+  if (mission.status === "CHANGES_REQUESTED") {
+    return Object.freeze({
+      anchorStatus: correctionAnchor,
+      kind: "changes-requested",
+      label: "Changes requested",
+      summary: mission.changeRequest.reason,
+      source,
+      priorSafeState: correctionAnchor,
+    });
+  }
+  if (mission.status === "BLOCKED") {
+    return Object.freeze({
+      anchorStatus: anchorForStatus(mission.blockedFrom),
+      kind: "blocked",
+      label: "Blocked",
+      summary: mission.block.blocker,
+      source,
+      priorSafeState: mission.blockedFrom,
+    });
+  }
+  if (mission.status === "CANCELLED") {
+    const priorSafeState =
+      mission.cancelledFrom === "BLOCKED"
+        ? mission.blockedFrom
+        : mission.cancelledFrom;
+    return Object.freeze({
+      anchorStatus: anchorForStatus(priorSafeState),
+      kind: "cancelled",
+      label: "Cancelled",
+      summary: mission.cancellation.summary,
+      source,
+      priorSafeState,
+    });
+  }
+  if (mission.status === "COMPLETED") {
+    return Object.freeze({
+      anchorStatus: mission.status,
+      kind: "completed",
+      label: "Completed",
+      summary: mission.completion?.summary ?? "Mission completed",
+      source,
+      priorSafeState: null,
+    });
+  }
+  return Object.freeze({
+    anchorStatus: mission.status,
+    kind: "active",
+    label: "Active",
+    summary: mission.events.at(-1)?.reason ?? "Mission is active",
+    source,
+    priorSafeState: null,
+  });
 }
 
 function latestEventTime(mission) {
@@ -86,13 +182,17 @@ function latestEventTime(mission) {
 
 function toMissionSummary(mission) {
   const latestEvent = mission.events.at(-1);
+  const controlState = deriveControlState(mission);
   return Object.freeze({
     id: mission.id,
     goal: mission.brief.goal,
     scope: mission.brief.scope,
     risk: mission.brief.risk,
     status: mission.status,
-    lifecycleCompletion: lifecycleCompletion(mission.status),
+    lifecycleCompletion: lifecycleCompletion(
+      mission,
+      controlState.anchorStatus,
+    ),
     eventCount: mission.events.length,
     latestEvent,
     nextAction: mission.allowedActions[0] ?? null,
@@ -197,6 +297,9 @@ export function deriveCommandDeckModel(missions) {
   const completedMissions = orderedMissions.filter(
     (mission) => mission.status === "COMPLETED",
   ).length;
+  const cancelledMissions = orderedMissions.filter(
+    (mission) => mission.status === "CANCELLED",
+  ).length;
   const latestSignals = orderedMissions
     .flatMap((mission) =>
       mission.events.map((event) => ({
@@ -215,8 +318,10 @@ export function deriveCommandDeckModel(missions) {
 
   return Object.freeze({
     metrics: Object.freeze({
-      activeMissions: orderedMissions.length - completedMissions,
+      activeMissions:
+        orderedMissions.length - completedMissions - cancelledMissions,
       completedMissions,
+      cancelledMissions,
       auditEvents: orderedMissions.reduce(
         (total, mission) => total + mission.events.length,
         0,
@@ -232,12 +337,70 @@ export function deriveCommandDeckModel(missions) {
   });
 }
 
+export function deriveApprovalRoomModel(mission) {
+  const releaseDecision = mission.releaseReadiness ?? mission.approval;
+  if (!mission.brief.releaseRequired || !releaseDecision) {
+    throw new Error(
+      "Approval Room requires a release Mission with a current decision snapshot.",
+    );
+  }
+  const decisionHistory = mission.events
+    .filter((event) =>
+      ["RELEASE_APPROVED", "RELEASE_REJECTED"].includes(event.type),
+    )
+    .map((event) =>
+      Object.freeze({
+        sequence: event.sequence,
+        type: event.type,
+        actor: event.actor,
+        reason: event.reason,
+        occurredAt: event.occurredAt,
+        decision: event.data.approval.decision,
+        summary: event.data.approval.summary,
+        evidenceRefs: Object.freeze([...event.evidenceRefs]),
+      }),
+    );
+  const externalActionExecuted = mission.events.some((event) =>
+    [
+      "RELEASED",
+      "DEPLOYED",
+      "COMMITTED",
+      "PUSHED",
+      "PULL_REQUEST_OPENED",
+    ].includes(event.type),
+  );
+
+  return Object.freeze({
+    missionId: mission.id,
+    goal: mission.brief.goal,
+    status: mission.status,
+    candidate: Object.freeze(structuredClone(releaseDecision.candidate)),
+    candidateArtifacts: Object.freeze(
+      structuredClone(releaseDecision.candidateArtifacts),
+    ),
+    contextPackVersion: releaseDecision.contextPackVersion,
+    evidence: Object.freeze([...releaseDecision.evidenceRefs]),
+    residualRisk: releaseDecision.residualRisk,
+    intendedExternalAction: releaseDecision.intendedExternalAction,
+    rollbackCommitment: releaseDecision.rollbackCommitment,
+    releaseAuthority: mission.brief.releaseAuthority,
+    canApprove: mission.allowedActions.includes("approve_release"),
+    canReject: mission.allowedActions.includes("reject_release"),
+    decisionHistory: Object.freeze(decisionHistory),
+    externalActionExecuted,
+  });
+}
+
 export function deriveMissionFlowModel(mission) {
-  const currentIndex = lifecycleIndex(mission.status);
+  const controlState = deriveControlState(mission);
+  const order = lifecycleOrder(mission);
+  const currentIndex = lifecycleIndex(mission, controlState.anchorStatus);
+  const { anchorStatus: _anchorStatus, ...visualStateData } = controlState;
+  const visualState = Object.freeze(visualStateData);
   const evidenceRefs = new Set(
     mission.events.flatMap((event) => event.evidenceRefs),
   );
-  const stages = MISSION_STATUS_ORDER.map((status, index) =>
+  const stages = order.map((status, index) =>
     Object.freeze({
       status,
       label: LIFECYCLE_LABELS[status],
@@ -247,19 +410,29 @@ export function deriveMissionFlowModel(mission) {
         index < currentIndex
           ? "done"
           : index === currentIndex
-            ? "current"
+            ? visualState.kind === "active" ||
+              visualState.kind === "completed"
+              ? "current"
+              : visualState.kind
             : "locked",
     }),
   );
 
   return Object.freeze({
     mission,
-    lifecycleCompletion: lifecycleCompletion(mission.status),
+    lifecycleCompletion: lifecycleCompletion(
+      mission,
+      controlState.anchorStatus,
+    ),
+    visualState,
     currentStage: Object.freeze({
       status: mission.status,
-      label: LIFECYCLE_LABELS[mission.status] ?? mission.status,
+      label:
+        visualState.kind === "active" || visualState.kind === "completed"
+          ? (LIFECYCLE_LABELS[mission.status] ?? mission.status)
+          : visualState.label,
       position: currentIndex + 1,
-      total: MISSION_STATUS_ORDER.length,
+      total: order.length,
     }),
     nextAction: mission.allowedActions[0] ?? null,
     evidenceCount: evidenceRefs.size,

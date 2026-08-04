@@ -18,6 +18,8 @@ export const MISSION_STATUS_ORDER = Object.freeze([
   "RUNNING",
   "IN_REVIEW",
   "VALIDATING",
+  "APPROVAL_REQUIRED",
+  "READY_TO_RELEASE",
   "LEARNING",
   "READY_TO_COMPLETE",
   "COMPLETED",
@@ -69,6 +71,14 @@ const COMMANDS = {
     field: "validation",
     requiresEvidence: true,
   },
+  APPROVE_RELEASE: {
+    action: "approve_release",
+    from: "APPROVAL_REQUIRED",
+    to: "READY_TO_RELEASE",
+    eventType: "RELEASE_APPROVED",
+    field: "approval",
+    requiresEvidence: true,
+  },
   CAPTURE_LEARNING: {
     action: "capture_learning",
     from: "LEARNING",
@@ -87,21 +97,176 @@ const COMMANDS = {
   },
 };
 
+const CORRECTION_COMMANDS = {
+  REJECT_REVIEW: {
+    action: "reject_review",
+    from: "IN_REVIEW",
+    eventType: "REVIEW_REJECTED",
+    field: "review",
+    requiresEvidence: true,
+  },
+  FAIL_VALIDATION: {
+    action: "fail_validation",
+    from: "VALIDATING",
+    eventType: "VALIDATION_FAILED",
+    field: "validation",
+    requiresEvidence: true,
+  },
+  REJECT_RELEASE: {
+    action: "reject_release",
+    from: "APPROVAL_REQUIRED",
+    eventType: "RELEASE_REJECTED",
+    field: "approval",
+    requiresEvidence: true,
+  },
+  START_CORRECTION: {
+    action: "start_correction",
+    from: ["CHANGES_REQUESTED", "RUNNING"],
+    eventType: "CORRECTION_STARTED",
+    field: "run",
+  },
+  REVISE_CONTEXT: {
+    action: "revise_context",
+    from: [
+      "CONTEXT_READY",
+      "PLANNED",
+      "RUNNING",
+      "IN_REVIEW",
+      "CHANGES_REQUESTED",
+      "VALIDATING",
+      "APPROVAL_REQUIRED",
+      "READY_TO_RELEASE",
+      "LEARNING",
+      "READY_TO_COMPLETE",
+    ],
+    eventType: "CONTEXT_REVISED",
+    field: "context",
+  },
+  BLOCK_MISSION: {
+    action: "block_mission",
+    from: [
+      "BRIEF_ACCEPTED",
+      "CONTEXT_READY",
+      "PLANNED",
+      "RUNNING",
+      "IN_REVIEW",
+      "CHANGES_REQUESTED",
+      "VALIDATING",
+      "APPROVAL_REQUIRED",
+      "READY_TO_RELEASE",
+      "LEARNING",
+      "READY_TO_COMPLETE",
+    ],
+    eventType: "MISSION_BLOCKED",
+    field: "block",
+  },
+  RESUME_MISSION: {
+    action: "resume_mission",
+    from: "BLOCKED",
+    eventType: "MISSION_RESUMED",
+    field: "resumption",
+  },
+  CANCEL_MISSION: {
+    action: "cancel_mission",
+    from: [
+      "BRIEF_ACCEPTED",
+      "CONTEXT_READY",
+      "PLANNED",
+      "RUNNING",
+      "IN_REVIEW",
+      "CHANGES_REQUESTED",
+      "VALIDATING",
+      "APPROVAL_REQUIRED",
+      "READY_TO_RELEASE",
+      "LEARNING",
+      "READY_TO_COMPLETE",
+      "BLOCKED",
+    ],
+    eventType: "MISSION_CANCELLED",
+    field: "cancellation",
+  },
+};
+
+const CHANGES_REQUESTED_ACTIONS = Object.freeze([
+  "start_correction",
+  "revise_context",
+  "block_mission",
+  "cancel_mission",
+]);
+
 const COMMAND_BY_STATUS = Object.fromEntries(
   Object.values(COMMANDS).map((command) => [command.from, command]),
 );
 
+function allowedActionsForMission(mission) {
+  if (["COMPLETED", "CANCELLED"].includes(mission.status)) {
+    return [];
+  }
+  if (mission.status === "BLOCKED") {
+    return ["resume_mission", "cancel_mission"];
+  }
+  if (mission.status === "CHANGES_REQUESTED") {
+    return [...CHANGES_REQUESTED_ACTIONS];
+  }
+  if (mission.status === "APPROVAL_REQUIRED") {
+    return [
+      "approve_release",
+      "reject_release",
+      "revise_context",
+      "block_mission",
+      "cancel_mission",
+    ];
+  }
+  if (mission.status === "READY_TO_RELEASE") {
+    return ["revise_context", "block_mission", "cancel_mission"];
+  }
+
+  const actions = [];
+  const primary = COMMAND_BY_STATUS[mission.status]?.action;
+  const hasInterruptedAssignedRun =
+    Boolean(mission.assignment) &&
+    mission.status === "RUNNING" &&
+    ["INTERRUPTED", "BLOCKED", "ERROR"].includes(mission.run?.status) &&
+    !mission.correctionActive;
+  const hasActiveAgentRun =
+    Boolean(mission.assignment) &&
+    mission.status === "RUNNING" &&
+    !hasInterruptedAssignedRun &&
+    !mission.correctionActive;
+  const hasRoutedAssignment =
+    Boolean(mission.assignment) && mission.status === "PLANNED";
+  if (hasInterruptedAssignedRun) {
+    actions.push("start_correction");
+  } else if (primary && !hasActiveAgentRun && !hasRoutedAssignment) {
+    actions.push(primary);
+  }
+  if (mission.status === "IN_REVIEW") {
+    actions.push("reject_review");
+  }
+  if (mission.status === "VALIDATING") {
+    actions.push("fail_validation");
+  }
+  if (CORRECTION_COMMANDS.REVISE_CONTEXT.from.includes(mission.status)) {
+    actions.push("revise_context");
+  }
+  actions.push("block_mission", "cancel_mission");
+  return appendUniqueStrings(actions);
+}
+
 export const MISSION_COMMAND_BY_ACTION = Object.freeze(
   Object.fromEntries(
-    Object.entries(COMMANDS).map(([commandType, command]) => [
-      command.action,
-      commandType,
-    ]),
+    [...Object.entries(COMMANDS), ...Object.entries(CORRECTION_COMMANDS)].map(
+      ([commandType, command]) => [command.action, commandType],
+    ),
   ),
 );
 
 const EVENT_PROJECTIONS = Object.fromEntries(
   Object.values(COMMANDS).map((command) => [command.eventType, command]),
+);
+
+const CORRECTION_EVENT_TYPES = new Set(
+  Object.values(CORRECTION_COMMANDS).map((command) => command.eventType),
 );
 
 const AGENT_EVENT_TYPE_BY_OBSERVATION = Object.freeze({
@@ -155,9 +320,26 @@ function assertValidBrief(brief) {
     throw new Error("Brief releaseRequired must be a boolean.");
   }
   if (brief.releaseRequired === true) {
-    throw new Error(
-      "Release-required Missions are not available in Ticket 01.",
+    const requiredReleasePlanFields = [
+      "residualRisk",
+      "intendedExternalAction",
+      "rollbackCommitment",
+    ];
+    const missingReleasePlanFields = requiredReleasePlanFields.filter(
+      (field) =>
+        typeof brief.releasePlan?.[field] !== "string" ||
+        brief.releasePlan[field].trim() === "",
     );
+    if (missingReleasePlanFields.length > 0) {
+      throw new Error(
+        `Release-required Brief is missing releasePlan: ${missingReleasePlanFields.join(", ")}.`,
+      );
+    }
+    if (brief.releaseAuthorized !== true) {
+      throw new Error(
+        "Release-required Brief must explicitly authorize release.",
+      );
+    }
   }
 }
 
@@ -255,6 +437,135 @@ function assertReplayString(value, event, field) {
   }
 }
 
+function assertBlockDetails(block, errorPrefix) {
+  if (
+    !block ||
+    typeof block !== "object" ||
+    Array.isArray(block) ||
+    typeof block.blocker !== "string" ||
+    block.blocker.trim() === "" ||
+    !Array.isArray(block.attemptedAlternatives) ||
+    block.attemptedAlternatives.some(
+      (alternative) =>
+        typeof alternative !== "string" || alternative.trim() === "",
+    ) ||
+    typeof block.requiredAuthorityOrInput !== "string" ||
+    block.requiredAuthorityOrInput.trim() === ""
+  ) {
+    throw new Error(
+      `${errorPrefix} requires blocker, attempted alternatives, and required authority or input.`,
+    );
+  }
+}
+
+function artifactReference(artifact) {
+  if (!artifact || typeof artifact !== "object") {
+    return null;
+  }
+  return ["uri", "path", "ref", "id"]
+    .map((field) => artifact[field])
+    .find((value) => typeof value === "string" && value.trim() !== "") ?? null;
+}
+
+function appendUniqueStrings(...collections) {
+  return [
+    ...new Set(
+      collections
+        .flat()
+        .filter((value) => typeof value === "string" && value.trim() !== ""),
+    ),
+  ];
+}
+
+function buildApprovalSnapshot(mission, decision, summary) {
+  return {
+    decision,
+    summary,
+    ...clone(mission.releaseReadiness),
+  };
+}
+
+function assertCurrentReleaseDecision(
+  mission,
+  { actor, evidenceRefs, approval },
+  expectedDecision,
+  eventLabel,
+) {
+  if (
+    !mission.brief.releaseRequired ||
+    mission.brief.releaseAuthorized !== true ||
+    !mission.releaseReadiness
+  ) {
+    throw new Error(`${eventLabel} requires current release readiness.`);
+  }
+  if (actor !== mission.brief.releaseAuthority) {
+    throw new Error(
+      `${eventLabel} requires release authority ${mission.brief.releaseAuthority}.`,
+    );
+  }
+  if (
+    !approval ||
+    approval.decision !== expectedDecision ||
+    typeof approval.summary !== "string" ||
+    approval.summary.trim() === ""
+  ) {
+    throw new Error(`${eventLabel} requires a human decision summary.`);
+  }
+  const current = mission.releaseReadiness;
+  const sameEvidence =
+    Array.isArray(evidenceRefs) &&
+    evidenceRefs.length === current.evidenceRefs.length &&
+    evidenceRefs.every(
+      (reference, index) => reference === current.evidenceRefs[index],
+    );
+  const snapshotMatches =
+    approval.contextPackVersion === current.contextPackVersion &&
+    artifactReference(approval.candidate) ===
+      artifactReference(current.candidate) &&
+    JSON.stringify(approval.candidate) ===
+      JSON.stringify(current.candidate) &&
+    JSON.stringify(approval.candidateArtifacts) ===
+      JSON.stringify(current.candidateArtifacts) &&
+    JSON.stringify(approval.evidenceRefs) ===
+      JSON.stringify(current.evidenceRefs) &&
+    approval.residualRisk === current.residualRisk &&
+    approval.intendedExternalAction === current.intendedExternalAction &&
+    approval.rollbackCommitment === current.rollbackCommitment;
+  if (
+    !sameEvidence ||
+    !snapshotMatches ||
+    evidenceRefs.some((reference) =>
+      mission.invalidatedEvidenceRefs?.includes(reference),
+    ) ||
+    mission.invalidatedArtifactRefs?.includes(
+      artifactReference(current.candidate),
+    )
+  ) {
+    throw new Error(
+      `${eventLabel} requires the exact current candidate and passing Evidence.`,
+    );
+  }
+}
+
+function invalidateCorrectionCandidate(
+  mission,
+  event,
+  { includeEventEvidence = true } = {},
+) {
+  mission.invalidatedEvidenceRefs = appendUniqueStrings(
+    mission.invalidatedEvidenceRefs ?? [],
+    mission.artifactEvidenceRefs ?? [],
+    mission.reviewEvidenceRefs ?? [],
+    mission.validationEvidenceRefs ?? [],
+    mission.approvalEvidenceRefs ?? [],
+    includeEventEvidence ? event.evidenceRefs : [],
+  );
+  mission.invalidatedArtifactRefs = appendUniqueStrings(
+    mission.invalidatedArtifactRefs ?? [],
+    (mission.artifacts ?? [mission.artifact]).map(artifactReference),
+  );
+}
+
 function projectAgentEvent(mission, event) {
   if (event.type === "ASSIGNMENT_ROUTED") {
     if (mission.status !== "PLANNED" || mission.assignment) {
@@ -287,7 +598,7 @@ function projectAgentEvent(mission, event) {
     }
     mission.assignment = clone(event.data.assignment);
     mission.agent = clone(event.data.agent);
-    mission.allowedActions = [];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
@@ -312,7 +623,7 @@ function projectAgentEvent(mission, event) {
     }
     mission.status = "RUNNING";
     mission.run = clone(event.data.run);
-    mission.allowedActions = [];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
@@ -329,7 +640,7 @@ function projectAgentEvent(mission, event) {
       );
     }
     mission.run = clone(event.data.run);
-    mission.allowedActions = [];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
@@ -353,7 +664,7 @@ function projectAgentEvent(mission, event) {
       );
     }
     mission.run = clone(event.data.run);
-    mission.allowedActions = [];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
@@ -390,11 +701,34 @@ function projectAgentEvent(mission, event) {
         `Cannot replay event ${event.sequence}: completed Run Evidence references do not match.`,
       );
     }
+    if (
+      evidenceRefs.some((reference) =>
+        (mission.invalidatedEvidenceRefs ?? []).includes(reference),
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: completed Run requires current Evidence.`,
+      );
+    }
+    const artifactRefs = event.data.artifacts.map(artifactReference);
+    if (
+      artifactRefs.some(
+        (reference) =>
+          !reference ||
+          (mission.invalidatedArtifactRefs ?? []).includes(reference),
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: completed Run requires regenerated Artifact references.`,
+      );
+    }
     mission.status = "IN_REVIEW";
     mission.run = clone(event.data.run);
     mission.artifacts = clone(event.data.artifacts);
     mission.artifact = clone(event.data.artifacts[0]);
+    mission.artifactEvidenceRefs = clone(event.evidenceRefs);
     mission.allowedActions = [COMMAND_BY_STATUS.IN_REVIEW.action];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
@@ -410,10 +744,295 @@ function projectAgentEvent(mission, event) {
       );
     }
     mission.run = clone(event.data.run);
-    mission.allowedActions = [];
+    mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
 
+}
+
+function projectCorrectionEvent(mission, event) {
+  if (event.type === "RELEASE_REJECTED") {
+    if (mission.status !== "APPROVAL_REQUIRED") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: RELEASE_REJECTED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertCurrentReleaseDecision(
+      mission,
+      {
+        actor: event.actor,
+        evidenceRefs: event.evidenceRefs,
+        approval: event.data.approval,
+      },
+      "REJECTED",
+      "RELEASE_REJECTED",
+    );
+    invalidateCorrectionCandidate(mission, event);
+    mission.status = "CHANGES_REQUESTED";
+    mission.approval = clone(event.data.approval);
+    mission.approvalEvidenceRefs = clone(event.evidenceRefs);
+    mission.releaseReadiness = null;
+    mission.changeRequest = {
+      source: "APPROVAL",
+      reason: event.data.approval.summary,
+      evidenceRefs: clone(event.evidenceRefs),
+      requestedAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "REVIEW_REJECTED") {
+    if (mission.status !== "IN_REVIEW") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: REVIEW_REJECTED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayObject(event.data.review, event, "review");
+    if (event.evidenceRefs.length === 0) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: REVIEW_REJECTED requires Evidence.`,
+      );
+    }
+    invalidateCorrectionCandidate(mission, event);
+    mission.status = "CHANGES_REQUESTED";
+    mission.review = {
+      ...clone(event.data.review),
+      outcome: "FAILED",
+    };
+    mission.reviewEvidenceRefs = clone(event.evidenceRefs);
+    mission.validation = null;
+    mission.validationEvidenceRefs = null;
+    mission.releaseReadiness = null;
+    mission.approval = null;
+    mission.approvalEvidenceRefs = null;
+    mission.changeRequest = {
+      source: "REVIEW",
+      reason: event.reason,
+      evidenceRefs: clone(event.evidenceRefs),
+      requestedAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "VALIDATION_FAILED") {
+    if (mission.status !== "VALIDATING") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: VALIDATION_FAILED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayObject(event.data.validation, event, "validation");
+    if (event.evidenceRefs.length === 0) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: VALIDATION_FAILED requires Evidence.`,
+      );
+    }
+    invalidateCorrectionCandidate(mission, event);
+    mission.status = "CHANGES_REQUESTED";
+    mission.validation = {
+      ...clone(event.data.validation),
+      outcome: "FAILED",
+    };
+    mission.validationEvidenceRefs = clone(event.evidenceRefs);
+    mission.changeRequest = {
+      source: "VALIDATION",
+      reason: event.reason,
+      evidenceRefs: clone(event.evidenceRefs),
+      requestedAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "CORRECTION_STARTED") {
+    const restartsInterruptedRun =
+      mission.status === "RUNNING" &&
+      Boolean(mission.assignment) &&
+      ["INTERRUPTED", "BLOCKED", "ERROR"].includes(mission.run?.status);
+    if (
+      !(
+        (mission.status === "CHANGES_REQUESTED" && mission.changeRequest) ||
+        restartsInterruptedRun
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: CORRECTION_STARTED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayObject(event.data.run, event, "run");
+    if (
+      mission.agent &&
+      event.data.run.agentRole !== mission.agent.roleId
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: CORRECTION_STARTED must return work to assigned role ${mission.agent.roleId}.`,
+      );
+    }
+    mission.status = "RUNNING";
+    mission.run = clone(event.data.run);
+    mission.artifact = null;
+    mission.artifacts = null;
+    mission.artifactEvidenceRefs = null;
+    mission.review = null;
+    mission.reviewEvidenceRefs = null;
+    mission.validation = null;
+    mission.validationEvidenceRefs = null;
+    mission.releaseReadiness = null;
+    mission.approval = null;
+    mission.approvalEvidenceRefs = null;
+    if (mission.changeRequest) {
+      mission.lastChangeRequest = clone(mission.changeRequest);
+    }
+    mission.changeRequest = null;
+    mission.correctionActive = true;
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "CONTEXT_REVISED") {
+    const command = CORRECTION_COMMANDS.REVISE_CONTEXT;
+    if (!command.from.includes(mission.status)) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: CONTEXT_REVISED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    if (event.contextPackVersion !== mission.contextPackVersion + 1) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: Context revision must increment the Context Pack version by one.`,
+      );
+    }
+    assertReplayObject(event.data.context, event, "context");
+    invalidateCorrectionCandidate(mission, event, {
+      includeEventEvidence: false,
+    });
+    const previousVersion = mission.contextPackVersion;
+    mission.status = "CONTEXT_READY";
+    mission.contextPackVersion = event.contextPackVersion;
+    mission.context = clone(event.data.context);
+    mission.plan = null;
+    mission.assignment = null;
+    mission.agent = null;
+    mission.run = null;
+    mission.artifacts = null;
+    mission.artifact = null;
+    mission.artifactEvidenceRefs = null;
+    mission.review = null;
+    mission.reviewEvidenceRefs = null;
+    mission.validation = null;
+    mission.validationEvidenceRefs = null;
+    mission.releaseReadiness = null;
+    mission.approval = null;
+    mission.approvalEvidenceRefs = null;
+    mission.learning = null;
+    mission.completion = null;
+    mission.lastChangeRequest = mission.changeRequest
+      ? clone(mission.changeRequest)
+      : (mission.lastChangeRequest ?? null);
+    mission.changeRequest = null;
+    mission.contextRevision = {
+      fromVersion: previousVersion,
+      toVersion: event.contextPackVersion,
+      reason: event.reason,
+      revisedAtSequence: event.sequence,
+    };
+    mission.correctionActive = false;
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "MISSION_BLOCKED") {
+    if (!CORRECTION_COMMANDS.BLOCK_MISSION.from.includes(mission.status)) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: MISSION_BLOCKED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertBlockDetails(
+      event.data.block,
+      `Cannot replay event ${event.sequence}: MISSION_BLOCKED`,
+    );
+    mission.blockedFrom = mission.status;
+    mission.blockedAllowedActions = clone(mission.allowedActions);
+    if (
+      mission.status === "RUNNING" &&
+      mission.assignment &&
+      mission.run?.status === "WORKING"
+    ) {
+      mission.run = {
+        ...clone(mission.run),
+        status: "INTERRUPTED",
+        updatedAt: event.occurredAt,
+        interruptionReason: event.reason,
+      };
+    }
+    mission.status = "BLOCKED";
+    mission.block = {
+      ...clone(event.data.block),
+      reason: event.reason,
+      blockedAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "MISSION_RESUMED") {
+    if (
+      mission.status !== "BLOCKED" ||
+      typeof mission.blockedFrom !== "string" ||
+      !mission.block
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: MISSION_RESUMED requires a blocked Mission with a prior safe state.`,
+      );
+    }
+    assertReplayObject(event.data.resumption, event, "resumption");
+    assertReplayString(
+      event.data.resumption.summary,
+      event,
+      "resumption summary",
+    );
+    const safeStatus = mission.blockedFrom;
+    mission.status = safeStatus;
+    mission.lastBlock = clone(mission.block);
+    mission.block = null;
+    mission.blockedFrom = null;
+    mission.blockedAllowedActions = null;
+    mission.resume = {
+      fromStatus: "BLOCKED",
+      toStatus: safeStatus,
+      reason: event.reason,
+      summary: event.data.resumption.summary,
+      resumedAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  if (event.type === "MISSION_CANCELLED") {
+    if (!CORRECTION_COMMANDS.CANCEL_MISSION.from.includes(mission.status)) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: MISSION_CANCELLED is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+    assertReplayObject(event.data.cancellation, event, "cancellation");
+    assertReplayString(
+      event.data.cancellation.summary,
+      event,
+      "cancellation summary",
+    );
+    const cancelledFrom = mission.status;
+    mission.status = "CANCELLED";
+    mission.cancelledFrom = cancelledFrom;
+    mission.cancellation = {
+      summary: event.data.cancellation.summary,
+      reason: event.reason,
+      cancelledAtSequence: event.sequence,
+    };
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  throw new Error(`Cannot replay unknown correction event: ${event.type}.`);
 }
 
 function projectMission(events, expectedMissionId) {
@@ -440,11 +1059,14 @@ function projectMission(events, expectedMissionId) {
     artifact: null,
     review: null,
     validation: null,
+    releaseReadiness: null,
+    approval: null,
     learning: null,
     completion: null,
     events: clone(events),
-    allowedActions: [COMMAND_BY_STATUS.BRIEF_ACCEPTED.action],
+    allowedActions: [],
   };
+  mission.allowedActions = allowedActionsForMission(mission);
 
   for (const [index, event] of events.slice(1).entries()) {
     assertEventEnvelope(event, {
@@ -459,6 +1081,18 @@ function projectMission(events, expectedMissionId) {
         );
       }
       projectAgentEvent(mission, event);
+      continue;
+    }
+    if (CORRECTION_EVENT_TYPES.has(event.type)) {
+      if (
+        event.type !== "CONTEXT_REVISED" &&
+        event.contextPackVersion !== mission.contextPackVersion
+      ) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: Context Pack version does not match.`,
+        );
+      }
+      projectCorrectionEvent(mission, event);
       continue;
     }
     const projection = EVENT_PROJECTIONS[event.type];
@@ -496,12 +1130,71 @@ function projectMission(events, expectedMissionId) {
         `Cannot replay event ${event.sequence}: release-required Mission cannot complete locally.`,
       );
     }
+    if (event.type === "RELEASE_APPROVED") {
+      assertCurrentReleaseDecision(
+        mission,
+        {
+          actor: event.actor,
+          evidenceRefs: event.evidenceRefs,
+          approval: event.data.approval,
+        },
+        "APPROVED",
+        "RELEASE_APPROVED",
+      );
+    }
+    if (
+      projection.requiresEvidence &&
+      event.evidenceRefs.some((reference) =>
+        mission.invalidatedEvidenceRefs?.includes(reference),
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ${event.type} requires current Evidence.`,
+      );
+    }
+    if (
+      event.type === "ARTIFACT_SUBMITTED" &&
+      (!artifactReference(event.data.artifact) ||
+        mission.invalidatedArtifactRefs?.includes(
+          artifactReference(event.data.artifact),
+        ))
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ARTIFACT_SUBMITTED requires a regenerated Artifact reference.`,
+      );
+    }
 
-    mission.status = projection.to;
+    mission.status =
+      event.type === "VALIDATION_PASSED" &&
+      mission.brief.releaseRequired
+        ? "APPROVAL_REQUIRED"
+        : projection.to;
     mission[projection.field] = clone(event.data[projection.field]);
-    mission.allowedActions = COMMAND_BY_STATUS[projection.to]
-      ? [COMMAND_BY_STATUS[projection.to].action]
-      : [];
+    if (
+      event.type === "VALIDATION_PASSED" &&
+      mission.brief.releaseRequired
+    ) {
+      mission.releaseReadiness = {
+        candidate: clone(mission.artifact),
+        candidateArtifacts: clone(
+          mission.artifacts ?? [mission.artifact],
+        ),
+        contextPackVersion: mission.contextPackVersion,
+        evidenceRefs: appendUniqueStrings(
+          mission.artifactEvidenceRefs ?? [],
+          mission.reviewEvidenceRefs ?? [],
+          event.evidenceRefs,
+        ),
+        ...clone(mission.brief.releasePlan),
+      };
+    }
+    if (event.type === "ARTIFACT_SUBMITTED") {
+      mission.correctionActive = false;
+    }
+    if (projection.requiresEvidence) {
+      mission[`${projection.field}EvidenceRefs`] = clone(event.evidenceRefs);
+    }
+    mission.allowedActions = allowedActionsForMission(mission);
   }
 
   return deepFreeze(mission);
@@ -655,6 +1348,7 @@ export function createMissionOrchestrator({
       evidenceRefs: clone(evidenceRefs),
       data: clone(data),
     };
+    projectMission([...mission.events, event], missionId);
     eventStore.append(missionId, [event], {
       expectedSequence: mission.events.length,
     });
@@ -744,6 +1438,125 @@ export function createMissionOrchestrator({
     }
   }
 
+  async function consumeAgentRun(
+    missionId,
+    routing,
+    { correction = false } = {},
+  ) {
+    let awaitingCorrectionStart = correction;
+    try {
+      for await (const observation of agentRouter.run(routing)) {
+        await writeCoordinator.runExclusive(() => {
+          const mission = getMission(missionId);
+          const startsCorrection =
+            awaitingCorrectionStart && observation.type === "RUN_STARTED";
+          if (awaitingCorrectionStart && !startsCorrection) {
+            throw new Error(
+              "Correction transport must start a Run before reporting progress or an outcome.",
+            );
+          }
+          if (
+            !startsCorrection &&
+            !["PLANNED", "RUNNING"].includes(mission.status)
+          ) {
+            throw new Error(
+              `Agent observation cannot be recorded while Mission is ${mission.status}.`,
+            );
+          }
+          const run = runFromObservation(mission, observation);
+          const eventType = startsCorrection
+            ? "CORRECTION_STARTED"
+            : AGENT_EVENT_TYPE_BY_OBSERVATION[observation.type];
+          if (!eventType) {
+            throw new Error(
+              `Unsupported agent observation: ${observation.type}.`,
+            );
+          }
+          const eventReason =
+            observation.summary ??
+            observation.blocker ??
+            `${startsCorrection ? "Started correction for" : "Started Assignment"} ${routing.assignment.id}`;
+          const evidenceRefs =
+            observation.type === "RUN_COMPLETED"
+              ? observation.evidence.map((item) => item.ref)
+              : [];
+          const eventRun = startsCorrection
+            ? { ...run, agentRole: routing.agent.roleId }
+            : run;
+
+          const appended = appendAgentEvent(missionId, {
+            type: eventType,
+            actor: `agent:${routing.agent.roleId}`,
+            reason: eventReason,
+            occurredAt: observation.occurredAt,
+            evidenceRefs,
+            data: {
+              run: eventRun,
+              ...(observation.type === "RUN_COMPLETED"
+                ? { artifacts: observation.artifacts }
+                : {}),
+            },
+          });
+          awaitingCorrectionStart = false;
+          return appended;
+        });
+        if (["RUN_COMPLETED", "RUN_BLOCKED"].includes(observation.type)) {
+          break;
+        }
+      }
+    } catch (error) {
+      await writeCoordinator.runExclusive(() => {
+        const mission = getMission(missionId);
+        if (!["PLANNED", "RUNNING"].includes(mission.status)) {
+          throw error;
+        }
+        const run = {
+          ...(mission.run ? clone(mission.run) : {}),
+          id: mission.run?.id ?? `unavailable:${routing.assignment.id}`,
+          status: "ERROR",
+          updatedAt: clock(),
+          error: error.message,
+        };
+        return appendAgentEvent(missionId, {
+          type: "AGENT_RUN_ERROR",
+          actor: "agent-router",
+          reason: error.message,
+          data: { run },
+        });
+      });
+      throw error;
+    }
+
+    const mission = getMission(missionId);
+    if (!["COMPLETED", "BLOCKED"].includes(mission.run?.status)) {
+      const error = new Error(
+        "Agent transport ended without a completed or blocked Run outcome.",
+      );
+      if (["PLANNED", "RUNNING"].includes(mission.status)) {
+        await writeCoordinator.runExclusive(() =>
+          appendAgentEvent(missionId, {
+            type: "AGENT_RUN_ERROR",
+            actor: "agent-router",
+            reason: error.message,
+            data: {
+              run: {
+                ...(mission.run ? clone(mission.run) : {}),
+                id:
+                  mission.run?.id ??
+                  `unavailable:${routing.assignment.id}`,
+                status: "ERROR",
+                updatedAt: clock(),
+                error: error.message,
+              },
+            },
+          }),
+        );
+      }
+      throw error;
+    }
+    return mission;
+  }
+
   return {
     createMission(input) {
       return writeCoordinator.runExclusive(() => {
@@ -810,91 +1623,41 @@ export function createMissionOrchestrator({
         }),
       );
 
-      try {
-        for await (const observation of agentRouter.run(routing)) {
-          await writeCoordinator.runExclusive(() => {
-            const mission = getMission(missionId);
-            const run = runFromObservation(mission, observation);
-            const eventType =
-              AGENT_EVENT_TYPE_BY_OBSERVATION[observation.type];
-            if (!eventType) {
-              throw new Error(
-                `Unsupported agent observation: ${observation.type}.`,
-              );
-            }
-            const eventReason =
-              observation.summary ??
-              observation.blocker ??
-              `Started Assignment ${routing.assignment.id}`;
-            const evidenceRefs =
-              observation.type === "RUN_COMPLETED"
-                ? observation.evidence.map((item) => item.ref)
-                : [];
-
-            return appendAgentEvent(missionId, {
-              type: eventType,
-              actor: `agent:${routing.agent.roleId}`,
-              reason: eventReason,
-              occurredAt: observation.occurredAt,
-              evidenceRefs,
-              data: {
-                run,
-                ...(observation.type === "RUN_COMPLETED"
-                  ? { artifacts: observation.artifacts }
-                  : {}),
-              },
-            });
-          });
-          if (
-            ["RUN_COMPLETED", "RUN_BLOCKED"].includes(observation.type)
-          ) {
-            break;
-          }
-        }
-      } catch (error) {
-        await writeCoordinator.runExclusive(() => {
-          const mission = getMission(missionId);
-          const run = {
-            ...(mission.run ? clone(mission.run) : {}),
-            id: mission.run?.id ?? `unavailable:${routing.assignment.id}`,
-            status: "ERROR",
-            updatedAt: clock(),
-            error: error.message,
-          };
-          return appendAgentEvent(missionId, {
-            type: "AGENT_RUN_ERROR",
-            actor: "agent-router",
-            reason: error.message,
-            data: { run },
-          });
-        });
-        throw error;
+      return consumeAgentRun(missionId, routing);
+    },
+    async dispatchCorrection(missionId, input) {
+      if (!agentRouter) {
+        throw new Error("Agent routing is not connected.");
       }
-
+      const { actor, reason } = input;
+      assertAuditMetadata({ actor, reason });
       const mission = getMission(missionId);
-      if (!["COMPLETED", "BLOCKED"].includes(mission.run?.status)) {
-        const error = new Error(
-          "Agent transport ended without a completed or blocked Run outcome.",
+      if (!mission.assignment || !mission.agent) {
+        throw new Error(
+          "A connected correction requires the existing assigned agent.",
         );
-        await writeCoordinator.runExclusive(() =>
-          appendAgentEvent(missionId, {
-            type: "AGENT_RUN_ERROR",
-            actor: "agent-router",
-            reason: error.message,
-            data: {
-              run: {
-                ...(mission.run ? clone(mission.run) : {}),
-                id: mission.run?.id ?? `unavailable:${routing.assignment.id}`,
-                status: "ERROR",
-                updatedAt: clock(),
-                error: error.message,
-              },
-            },
-          }),
-        );
-        throw error;
       }
-      return mission;
+      const interruptedAssignedRun =
+        mission.status === "RUNNING" &&
+        ["INTERRUPTED", "BLOCKED", "ERROR"].includes(mission.run?.status);
+      if (
+        !(
+          mission.status === "CHANGES_REQUESTED" ||
+          interruptedAssignedRun
+        )
+      ) {
+        throw new Error(
+          `Correction dispatch is not allowed while Mission is ${mission.status}.`,
+        );
+      }
+      const routing = agentRouter.route(mission.assignment);
+      if (routing.agent.roleId !== mission.agent.roleId) {
+        throw new Error(
+          `Correction routing changed assigned role from ${mission.agent.roleId} to ${routing.agent.roleId}.`,
+        );
+      }
+      assertAssignmentWithinMissionAuthority(mission, routing);
+      return consumeAgentRun(missionId, routing, { correction: true });
     },
     execute(missionId, input) {
       return writeCoordinator.runExclusive(() => {
@@ -906,13 +1669,16 @@ export function createMissionOrchestrator({
           evidenceRefs = [],
         } = input;
         const mission = getMission(missionId);
-        const command = COMMANDS[type];
+        const command = COMMANDS[type] ?? CORRECTION_COMMANDS[type];
 
         if (!command) {
           throw new Error(`Unknown command: ${type}.`);
         }
         assertAuditMetadata({ actor, reason });
-        if (mission.status !== command.from) {
+        const allowedFrom = Array.isArray(command.from)
+          ? command.from
+          : [command.from];
+        if (!allowedFrom.includes(mission.status)) {
           throw new Error(
             `${type} is not allowed while Mission is ${mission.status}.`,
           );
@@ -938,6 +1704,89 @@ export function createMissionOrchestrator({
         if (type === "COMPLETE_NO_RELEASE" && mission.brief.releaseRequired) {
           throw new Error("A release-required Mission cannot complete locally.");
         }
+        if (type === "BLOCK_MISSION") {
+          assertBlockDetails(payload.block, "BLOCK_MISSION");
+        }
+        if (
+          type === "START_CORRECTION" &&
+          mission.agent &&
+          payload.run.agentRole !== mission.agent.roleId
+        ) {
+          throw new Error(
+            `START_CORRECTION must return work to assigned role ${mission.agent.roleId}.`,
+          );
+        }
+        if (
+          type === "START_CORRECTION" &&
+          mission.status === "RUNNING" &&
+          !(
+            mission.assignment &&
+            ["INTERRUPTED", "BLOCKED", "ERROR"].includes(
+              mission.run?.status,
+            )
+          )
+        ) {
+          throw new Error(
+            "START_CORRECTION requires requested changes or an interrupted assigned Run.",
+          );
+        }
+        if (
+          type === "RESUME_MISSION" &&
+          (typeof payload.resumption.summary !== "string" ||
+            payload.resumption.summary.trim() === "")
+        ) {
+          throw new Error("RESUME_MISSION requires a resumption summary.");
+        }
+        if (
+          type === "CANCEL_MISSION" &&
+          (typeof payload.cancellation.summary !== "string" ||
+            payload.cancellation.summary.trim() === "")
+        ) {
+          throw new Error("CANCEL_MISSION requires a cancellation summary.");
+        }
+        if (type === "SUBMIT_ARTIFACT") {
+          const reference = artifactReference(payload.artifact);
+          if (!reference) {
+            throw new Error(
+              "SUBMIT_ARTIFACT requires an Artifact reference (uri, path, ref, or id).",
+            );
+          }
+          if (mission.invalidatedArtifactRefs?.includes(reference)) {
+            throw new Error(
+              "SUBMIT_ARTIFACT requires a regenerated Artifact reference.",
+            );
+          }
+        }
+        if (
+          command.requiresEvidence &&
+          evidenceRefs.some((reference) =>
+            mission.invalidatedEvidenceRefs?.includes(reference),
+          )
+        ) {
+          throw new Error(`${type} requires current Evidence.`);
+        }
+        let eventPayload = payload;
+        if (["APPROVE_RELEASE", "REJECT_RELEASE"].includes(type)) {
+          const decision =
+            type === "APPROVE_RELEASE" ? "APPROVED" : "REJECTED";
+          eventPayload = {
+            approval: buildApprovalSnapshot(
+              mission,
+              decision,
+              payload.approval.summary,
+            ),
+          };
+          assertCurrentReleaseDecision(
+            mission,
+            {
+              actor,
+              evidenceRefs,
+              approval: eventPayload.approval,
+            },
+            decision,
+            type,
+          );
+        }
 
         const event = {
           id: createId("event"),
@@ -947,10 +1796,14 @@ export function createMissionOrchestrator({
           actor,
           occurredAt: clock(),
           reason,
-          contextPackVersion: mission.contextPackVersion,
+          contextPackVersion:
+            type === "REVISE_CONTEXT"
+              ? mission.contextPackVersion + 1
+              : mission.contextPackVersion,
           evidenceRefs: clone(evidenceRefs),
-          data: clone(payload),
+          data: clone(eventPayload),
         };
+        projectMission([...mission.events, event], missionId);
         eventStore.append(missionId, [event], {
           expectedSequence: mission.events.length,
         });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deriveApprovalRoomModel,
   deriveCommandDeckModel,
   deriveMissionFlowModel,
 } from "../src/mission-presenter.js";
@@ -83,6 +84,7 @@ test("Command Deck derives honest metrics and configured team state from Mission
       metrics: {
         activeMissions: 1,
         completedMissions: 1,
+        cancelledMissions: 0,
         auditEvents: 3,
         configuredAgents: 6,
         agentTelemetry: "Unavailable",
@@ -133,6 +135,7 @@ test("Command Deck derives honest metrics and configured team state from Mission
       },
     },
   );
+
 });
 
 test("Mission Flow derives lifecycle completion and evidence counts without inventing confidence", () => {
@@ -224,6 +227,7 @@ test("Mission Flow derives lifecycle completion and evidence counts without inve
       },
     },
   );
+
 });
 
 test("team telemetry is derived only from observable Assignment and Run state", () => {
@@ -389,6 +393,456 @@ test("team telemetry exposes an observed transport error as error, not working",
       telemetry: "Error",
       assignment: "Run a bounded inspection",
       elapsedTime: null,
+    },
+  );
+});
+
+test("Mission Flow distinguishes changes-requested, blocked, resumed, and cancelled control states", () => {
+  let generatedId = 0;
+  const orchestrator = createMissionOrchestrator({
+    eventStore: createMemoryEventStore(),
+    clock: () => "2026-07-30T10:00:00.000Z",
+    createId: (kind) =>
+      kind === "mission" ? "mission-control-loop" : `event-${++generatedId}`,
+  });
+  const created = orchestrator.createMission({
+    brief,
+    actor: "mission-owner",
+    reason: "Create a Mission with observable control states",
+  });
+  const execute = (type, payload, reason, evidenceRefs = []) =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor: "mission-owner",
+      reason,
+      evidenceRefs,
+    });
+  execute(
+    "CAPTURE_CONTEXT",
+    { context: { summary: "Control-state presentation Context" } },
+    "Capture Context",
+  );
+  execute(
+    "ACCEPT_PLAN",
+    { plan: { steps: ["build", "review", "correct"] } },
+    "Accept plan",
+  );
+  execute(
+    "START_RUN",
+    { run: { id: "run-001", agentRole: "terra_builder" } },
+    "Start implementation",
+  );
+  execute(
+    "SUBMIT_ARTIFACT",
+    { artifact: { name: "candidate", uri: "artifact://candidate" } },
+    "Submit candidate",
+    ["evidence://artifact"],
+  );
+  const changesRequested = execute(
+    "REJECT_REVIEW",
+    { review: { summary: "Retry guard is incomplete" } },
+    "Review requested an idempotency correction",
+    ["evidence://review-failure"],
+  );
+  const changesModel = deriveMissionFlowModel(changesRequested);
+
+  const blocked = execute(
+    "BLOCK_MISSION",
+    {
+      block: {
+        blocker: "Required replay fixture is unavailable",
+        attemptedAlternatives: ["Inspected existing fixtures"],
+        requiredAuthorityOrInput: "Provide the missing fixture",
+      },
+    },
+    "Pause the requested correction",
+  );
+  const blockedModel = deriveMissionFlowModel(blocked);
+
+  const resumed = execute(
+    "RESUME_MISSION",
+    { resumption: { summary: "Replay fixture supplied" } },
+    "Resume the requested correction",
+  );
+  const resumedModel = deriveMissionFlowModel(resumed);
+
+  const cancelled = execute(
+    "CANCEL_MISSION",
+    { cancellation: { summary: "The correction is no longer required" } },
+    "Cancel the Mission",
+  );
+  const cancelledModel = deriveMissionFlowModel(cancelled);
+
+  assert.deepEqual(
+    {
+      changes: {
+        visualState: changesModel.visualState,
+        currentStage: changesModel.currentStage,
+        activeStage: changesModel.stages.find((stage) =>
+          ["changes-requested", "blocked", "resumed", "cancelled"].includes(
+            stage.state,
+          ),
+        ),
+      },
+      blocked: {
+        visualState: blockedModel.visualState,
+        currentStage: blockedModel.currentStage,
+        activeStage: blockedModel.stages.find((stage) =>
+          ["changes-requested", "blocked", "resumed", "cancelled"].includes(
+            stage.state,
+          ),
+        ),
+      },
+      resumed: {
+        visualState: resumedModel.visualState,
+        currentStage: resumedModel.currentStage,
+        activeStage: resumedModel.stages.find((stage) =>
+          ["changes-requested", "blocked", "resumed", "cancelled"].includes(
+            stage.state,
+          ),
+        ),
+      },
+      cancelled: {
+        visualState: cancelledModel.visualState,
+        currentStage: cancelledModel.currentStage,
+        activeStage: cancelledModel.stages.find((stage) =>
+          ["changes-requested", "blocked", "resumed", "cancelled"].includes(
+            stage.state,
+          ),
+        ),
+      },
+    },
+    {
+      changes: {
+        visualState: {
+          kind: "changes-requested",
+          label: "Changes requested",
+          summary: "Review requested an idempotency correction",
+          source: "REVIEW",
+          priorSafeState: "IN_REVIEW",
+        },
+        currentStage: {
+          status: "CHANGES_REQUESTED",
+          label: "Changes requested",
+          position: 5,
+          total: 9,
+        },
+        activeStage: {
+          status: "IN_REVIEW",
+          label: "Review",
+          index: 4,
+          number: 5,
+          state: "changes-requested",
+        },
+      },
+      blocked: {
+        visualState: {
+          kind: "blocked",
+          label: "Blocked",
+          summary: "Required replay fixture is unavailable",
+          source: "REVIEW",
+          priorSafeState: "CHANGES_REQUESTED",
+        },
+        currentStage: {
+          status: "BLOCKED",
+          label: "Blocked",
+          position: 5,
+          total: 9,
+        },
+        activeStage: {
+          status: "IN_REVIEW",
+          label: "Review",
+          index: 4,
+          number: 5,
+          state: "blocked",
+        },
+      },
+      resumed: {
+        visualState: {
+          kind: "resumed",
+          label: "Resumed",
+          summary: "Replay fixture supplied",
+          source: "REVIEW",
+          priorSafeState: "CHANGES_REQUESTED",
+        },
+        currentStage: {
+          status: "CHANGES_REQUESTED",
+          label: "Resumed",
+          position: 5,
+          total: 9,
+        },
+        activeStage: {
+          status: "IN_REVIEW",
+          label: "Review",
+          index: 4,
+          number: 5,
+          state: "resumed",
+        },
+      },
+      cancelled: {
+        visualState: {
+          kind: "cancelled",
+          label: "Cancelled",
+          summary: "The correction is no longer required",
+          source: "REVIEW",
+          priorSafeState: "CHANGES_REQUESTED",
+        },
+        currentStage: {
+          status: "CANCELLED",
+          label: "Cancelled",
+          position: 5,
+          total: 9,
+        },
+        activeStage: {
+          status: "IN_REVIEW",
+          label: "Review",
+          index: 4,
+          number: 5,
+          state: "cancelled",
+        },
+      },
+    },
+  );
+
+  const deck = deriveCommandDeckModel([cancelled]);
+  assert.deepEqual(
+    {
+      activeMissions: deck.metrics.activeMissions,
+      completedMissions: deck.metrics.completedMissions,
+      cancelledMissions: deck.metrics.cancelledMissions,
+      missionStatus: deck.missions[0].status,
+      lifecycleCompletion: deck.missions[0].lifecycleCompletion,
+    },
+    {
+      activeMissions: 0,
+      completedMissions: 0,
+      cancelledMissions: 1,
+      missionStatus: "CANCELLED",
+      lifecycleCompletion: 56,
+    },
+  );
+});
+
+test("Mission Flow surfaces the human rejection rationale at the Approval stage", () => {
+  const mission = {
+    id: "mission-release-rejected",
+    brief: {
+      ...brief,
+      releaseRequired: true,
+      releaseAuthorized: true,
+      releaseAuthority: "release-owner",
+    },
+    status: "CHANGES_REQUESTED",
+    contextPackVersion: 1,
+    changeRequest: {
+      source: "APPROVAL",
+      reason: "Rollback evidence needs the database restore procedure",
+      evidenceRefs: ["evidence://approval-rejection"],
+      requestedAtSequence: 8,
+    },
+    allowedActions: [
+      "start_correction",
+      "revise_context",
+      "block_mission",
+      "cancel_mission",
+    ],
+    events: [
+      event(
+        8,
+        "RELEASE_REJECTED",
+        "2026-07-30T12:30:00.000Z",
+        ["evidence://approval-rejection"],
+      ),
+    ],
+  };
+
+  const model = deriveMissionFlowModel(mission);
+
+  assert.deepEqual(
+    {
+      visualState: model.visualState,
+      currentStage: model.currentStage,
+      activeStage: model.stages.find(
+        (stage) => stage.state === "changes-requested",
+      ),
+    },
+    {
+      visualState: {
+        kind: "changes-requested",
+        label: "Changes requested",
+        summary: "Rollback evidence needs the database restore procedure",
+        source: "APPROVAL",
+        priorSafeState: "APPROVAL_REQUIRED",
+      },
+      currentStage: {
+        status: "CHANGES_REQUESTED",
+        label: "Changes requested",
+        position: 7,
+        total: 11,
+      },
+      activeStage: {
+        status: "APPROVAL_REQUIRED",
+        label: "Approval",
+        index: 6,
+        number: 7,
+        state: "changes-requested",
+      },
+    },
+  );
+});
+
+test("Review Ledger derives the exact current release decision without inventing deployment", () => {
+  let generatedId = 0;
+  const orchestrator = createMissionOrchestrator({
+    eventStore: createMemoryEventStore(),
+    clock: () => "2026-07-30T13:00:00.000Z",
+    createId: (kind) =>
+      kind === "mission" ? "mission-release" : `event-${++generatedId}`,
+  });
+  const created = orchestrator.createMission({
+    brief: {
+      ...brief,
+      releaseRequired: true,
+      releaseAuthorized: true,
+      releaseAuthority: "release-owner",
+      releasePlan: {
+        residualRisk: "A failed rollout may require rollback",
+        intendedExternalAction: "Deploy the approved build",
+        rollbackCommitment: "Restore release 41",
+      },
+    },
+    actor: "mission-owner",
+    reason: "Create release Mission",
+  });
+  const execute = (type, payload, reason, evidenceRefs = []) =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor: "mission-owner",
+      reason,
+      evidenceRefs,
+    });
+  execute(
+    "CAPTURE_CONTEXT",
+    { context: { summary: "Release Context" } },
+    "Capture Context",
+  );
+  execute(
+    "ACCEPT_PLAN",
+    { plan: { steps: ["build", "review", "validate"] } },
+    "Accept plan",
+  );
+  execute(
+    "START_RUN",
+    { run: { id: "run-release", agentRole: "terra_builder" } },
+    "Start run",
+  );
+  execute(
+    "SUBMIT_ARTIFACT",
+    {
+      artifact: {
+        name: "release-42",
+        uri: "artifact://release-42",
+      },
+    },
+    "Submit release candidate",
+    ["evidence://artifact-42"],
+  );
+  execute(
+    "PASS_REVIEW",
+    { review: { summary: "Review passed" } },
+    "Pass review",
+    ["evidence://review-42"],
+  );
+  const pendingMission = execute(
+    "PASS_VALIDATION",
+    { validation: { summary: "Validation passed" } },
+    "Pass validation",
+    ["evidence://validation-42"],
+  );
+
+  const pending = deriveApprovalRoomModel(pendingMission);
+  const approvedMission = orchestrator.execute(created.id, {
+    type: "APPROVE_RELEASE",
+    payload: { approval: { summary: "Approve release 42" } },
+    actor: "release-owner",
+    reason: "Accept current residual risk",
+    evidenceRefs: pendingMission.releaseReadiness.evidenceRefs,
+  });
+  const approved = deriveApprovalRoomModel(approvedMission);
+
+  assert.deepEqual(
+    {
+      pending: {
+        status: pending.status,
+        candidate: pending.candidate,
+        candidateArtifacts: pending.candidateArtifacts,
+        evidence: pending.evidence,
+        residualRisk: pending.residualRisk,
+        intendedExternalAction: pending.intendedExternalAction,
+        rollbackCommitment: pending.rollbackCommitment,
+        releaseAuthority: pending.releaseAuthority,
+        canApprove: pending.canApprove,
+        canReject: pending.canReject,
+        externalActionExecuted: pending.externalActionExecuted,
+      },
+      approved: {
+        status: approved.status,
+        canApprove: approved.canApprove,
+        canReject: approved.canReject,
+        decisionHistory: approved.decisionHistory,
+        externalActionExecuted: approved.externalActionExecuted,
+      },
+    },
+    {
+      pending: {
+        status: "APPROVAL_REQUIRED",
+        candidate: {
+          name: "release-42",
+          uri: "artifact://release-42",
+        },
+        candidateArtifacts: [
+          {
+            name: "release-42",
+            uri: "artifact://release-42",
+          },
+        ],
+        evidence: [
+          "evidence://artifact-42",
+          "evidence://review-42",
+          "evidence://validation-42",
+        ],
+        residualRisk: "A failed rollout may require rollback",
+        intendedExternalAction: "Deploy the approved build",
+        rollbackCommitment: "Restore release 41",
+        releaseAuthority: "release-owner",
+        canApprove: true,
+        canReject: true,
+        externalActionExecuted: false,
+      },
+      approved: {
+        status: "READY_TO_RELEASE",
+        canApprove: false,
+        canReject: false,
+        decisionHistory: [
+          {
+            sequence: 8,
+            type: "RELEASE_APPROVED",
+            actor: "release-owner",
+            reason: "Accept current residual risk",
+            occurredAt: "2026-07-30T13:00:00.000Z",
+            decision: "APPROVED",
+            summary: "Approve release 42",
+            evidenceRefs: [
+              "evidence://artifact-42",
+              "evidence://review-42",
+              "evidence://validation-42",
+            ],
+          },
+        ],
+        externalActionExecuted: false,
+      },
     },
   );
 });
