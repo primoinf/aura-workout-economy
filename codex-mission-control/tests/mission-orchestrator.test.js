@@ -188,6 +188,8 @@ test("mission owner can create a Mission from a valid Brief", () => {
     brief: validBrief,
     context: null,
     plan: null,
+    execution: null,
+    executionReviewEvidenceRefs: null,
     run: null,
     artifact: null,
     review: null,
@@ -198,6 +200,7 @@ test("mission owner can create a Mission from a valid Brief", () => {
     completion: null,
     events: [
       {
+        schemaVersion: 2,
         id: "event-1",
         missionId: "mission-001",
         sequence: 1,
@@ -630,6 +633,7 @@ test("authorized human approval records the exact candidate without releasing it
         "cancel_mission",
       ],
       latestEvent: {
+        schemaVersion: 2,
         id: "event-8",
         missionId: created.id,
         sequence: 8,
@@ -2307,6 +2311,7 @@ test("review rejection enters CHANGES_REQUESTED with distinct reason and Evidenc
         "cancel_mission",
       ],
       latestEvent: {
+        schemaVersion: 2,
         id: "event-6",
         missionId: "mission-001",
         sequence: 6,
@@ -2708,6 +2713,7 @@ test("material Context revision increments its version and invalidates downstrea
         "cancel_mission",
       ],
       latestEvent: {
+        schemaVersion: 2,
         id: "event-8",
         missionId: "mission-001",
         sequence: 8,
@@ -3486,7 +3492,7 @@ test("connected correction dispatches the regenerated candidate to the assigned 
       artifact: corrected.artifact,
       artifactEvidenceRefs: corrected.artifactEvidenceRefs,
       tailEventTypes: corrected.events
-        .slice(-2)
+        .slice(-3)
         .map((event) => event.type),
     },
     {
@@ -3499,7 +3505,11 @@ test("connected correction dispatches the regenerated candidate to the assigned 
         uri: "artifact://candidate-v2",
       },
       artifactEvidenceRefs: ["evidence://candidate-v2"],
-      tailEventTypes: ["CORRECTION_STARTED", "AGENT_RUN_COMPLETED"],
+      tailEventTypes: [
+        "CORRECTION_DISPATCHED",
+        "AGENT_RUN_STARTED",
+        "AGENT_RUN_COMPLETED",
+      ],
     },
   );
 
@@ -3543,4 +3553,736 @@ test("connected correction dispatches the regenerated candidate to the assigned 
       staleCompletionPersisted: false,
     },
   );
+});
+
+test("planned Task Graph exposes dependencies and its unblocked Assignment frontier", () => {
+  const orchestrator = createHarness();
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission with dependency-aware work",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: {
+      context: {
+        summary: "Context for a multi-agent Mission",
+        sourceRefs: ["tickets.md#05"],
+      },
+    },
+    actor: "mission-owner",
+    reason: "Capture the Ticket 05 Context",
+  });
+
+  const task = (id, goal, overrides = {}) => ({
+    ...boundedAssignment,
+    id,
+    goal,
+    dependsOn: [],
+    ...overrides,
+  });
+  const planned = orchestrator.execute(created.id, {
+    type: "ACCEPT_PLAN",
+    payload: {
+      plan: {
+        steps: ["inspect", "build", "review"],
+        taskGraph: {
+          capacity: 4,
+          coordinationRequired: true,
+          assignments: [
+            task("inspect-events", "Inspect the current event model"),
+            task("inventory-ui", "Inventory the Mission Detail UI"),
+            task("build-waves", "Build safe execution waves", {
+              dependsOn: ["inspect-events", "inventory-ui"],
+              workKind: "implementation",
+              effectivePermission: "workspace-write",
+              ownershipBoundary: {
+                readPaths: ["codex-mission-control/src"],
+                writePaths: ["codex-mission-control/src"],
+              },
+            }),
+            task("review-waves", "Review the execution-wave candidate", {
+              dependsOn: ["build-waves"],
+              workKind: "review",
+              risk: "high",
+            }),
+          ],
+        },
+      },
+    },
+    actor: "mission-owner",
+    reason: "Accept a dependency-aware execution plan",
+  });
+
+  assert.deepEqual(
+    {
+      capacity: planned.execution.capacity,
+      reservedSlots: planned.execution.reservedSlots,
+      workerCapacity: planned.execution.workerCapacity,
+      frontier: planned.execution.frontier,
+      nodes: planned.execution.nodes.map((node) => ({
+        id: node.assignment.id,
+        dependsOn: node.dependsOn,
+        status: node.status,
+      })),
+      allowedActions: planned.allowedActions,
+    },
+    {
+      capacity: 4,
+      reservedSlots: 1,
+      workerCapacity: 3,
+      frontier: ["inspect-events", "inventory-ui"],
+      nodes: [
+        { id: "inspect-events", dependsOn: [], status: "PENDING" },
+        { id: "inventory-ui", dependsOn: [], status: "PENDING" },
+        {
+          id: "build-waves",
+          dependsOn: ["inspect-events", "inventory-ui"],
+          status: "PENDING",
+        },
+        {
+          id: "review-waves",
+          dependsOn: ["build-waves"],
+          status: "PENDING",
+        },
+      ],
+      allowedActions: [
+        "dispatch_execution_wave",
+        "revise_context",
+        "block_mission",
+        "cancel_mission",
+      ],
+    },
+  );
+});
+
+test("Task Graph rejects a dependency cycle before appending the Plan", () => {
+  const orchestrator = createHarness();
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for cycle validation",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: { context: { summary: "Cycle validation Context" } },
+    actor: "mission-owner",
+    reason: "Capture Context before planning",
+  });
+
+  assert.throws(
+    () =>
+      orchestrator.execute(created.id, {
+        type: "ACCEPT_PLAN",
+        payload: {
+          plan: {
+            taskGraph: {
+              capacity: 4,
+              coordinationRequired: true,
+              assignments: [
+                { ...boundedAssignment, id: "task-a", dependsOn: ["task-b"] },
+                { ...boundedAssignment, id: "task-b", dependsOn: ["task-a"] },
+              ],
+            },
+          },
+        },
+        actor: "mission-owner",
+        reason: "Attempt to accept a cyclic Task Graph",
+      }),
+    /Task Graph contains a dependency cycle/,
+  );
+  assert.equal(orchestrator.getMission(created.id).status, "CONTEXT_READY");
+  assert.equal(orchestrator.getMission(created.id).events.length, 2);
+});
+
+test("execution wave reserves Orchestrator capacity and serializes overlapping writable ownership", async () => {
+  const transportRequests = [];
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        transportRequests.push(request);
+        const assignmentId = request.assignment.id;
+        yield {
+          kind: "started",
+          runId: `run:${assignmentId}`,
+          occurredAt: "2026-08-08T09:00:00.000Z",
+          model: { name: "observable-model", reasoningEffort: "medium" },
+        };
+        yield {
+          kind: "completed",
+          runId: `run:${assignmentId}`,
+          occurredAt: "2026-08-08T09:01:00.000Z",
+          summary: `Completed ${assignmentId}`,
+          artifacts: [
+            {
+              name: `${assignmentId}-artifact`,
+              uri: `artifact://${assignmentId}`,
+            },
+          ],
+          evidence: [
+            {
+              ref: `evidence://${assignmentId}`,
+              kind: "test",
+              summary: `Observed completion for ${assignmentId}`,
+            },
+          ],
+        };
+      },
+    },
+  });
+  const orchestrator = createHarness(createMemoryEventStore(), agentRouter);
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for safe wave execution",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: { context: { summary: "Safe-wave Context" } },
+    actor: "mission-owner",
+    reason: "Capture safe-wave Context",
+  });
+  const task = (id, ownershipBoundary, overrides = {}) => ({
+    ...boundedAssignment,
+    id,
+    goal: `Complete ${id}`,
+    dependsOn: [],
+    ownershipBoundary,
+    effectivePermission:
+      ownershipBoundary.writePaths.length > 0 ? "workspace-write" : "read-only",
+    workKind:
+      ownershipBoundary.writePaths.length > 0 ? "implementation" : "deterministic",
+    ...overrides,
+  });
+  orchestrator.execute(created.id, {
+    type: "ACCEPT_PLAN",
+    payload: {
+      plan: {
+        taskGraph: {
+          capacity: 4,
+          coordinationRequired: true,
+          assignments: [
+            task("write-shared", {
+              readPaths: ["codex-mission-control/src"],
+              writePaths: ["codex-mission-control/src/shared"],
+            }),
+            task("write-shared-child", {
+              readPaths: ["codex-mission-control/src"],
+              writePaths: ["codex-mission-control/src/shared/feature.js"],
+            }),
+            task("inspect-events", {
+              readPaths: ["codex-mission-control/src/mission-orchestrator.js"],
+              writePaths: [],
+            }),
+            task("write-tests", {
+              readPaths: ["codex-mission-control/tests"],
+              writePaths: ["codex-mission-control/tests"],
+            }),
+            task("write-docs", {
+              readPaths: ["codex-mission-control"],
+              writePaths: ["codex-mission-control/docs"],
+            }),
+            task(
+              "review-safe-wave",
+              {
+                readPaths: ["codex-mission-control"],
+                writePaths: [],
+              },
+              {
+                dependsOn: [
+                  "write-shared",
+                  "write-shared-child",
+                  "inspect-events",
+                  "write-tests",
+                  "write-docs",
+                ],
+                workKind: "review",
+                risk: "high",
+                effectivePermission: "read-only",
+              },
+            ),
+          ],
+        },
+      },
+    },
+    actor: "mission-owner",
+    reason: "Accept the safe execution-wave plan",
+  });
+
+  const afterWave = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the first safe execution wave",
+  });
+
+  assert.deepEqual(
+    transportRequests.map((request) => ({
+      assignmentId: request.assignment.id,
+      roleId: request.roleId,
+      permission: request.permission,
+    })),
+    [
+      {
+        assignmentId: "write-shared",
+        roleId: "terra_builder",
+        permission: "workspace-write",
+      },
+      {
+        assignmentId: "inspect-events",
+        roleId: "luna_worker",
+        permission: "read-only",
+      },
+      {
+        assignmentId: "write-tests",
+        roleId: "terra_builder",
+        permission: "workspace-write",
+      },
+    ],
+  );
+  assert.deepEqual(afterWave.execution.waves[0], {
+    id: afterWave.execution.waves[0].id,
+    capacity: 4,
+    reservedSlots: 1,
+    workerCapacity: 3,
+    assignmentIds: ["write-shared", "inspect-events", "write-tests"],
+    serializedAssignmentIds: ["write-shared-child"],
+    deferredAssignmentIds: ["write-docs"],
+    status: "COMPLETED",
+  });
+  assert.deepEqual(
+    afterWave.execution.nodes.map((node) => [node.assignment.id, node.status]),
+    [
+      ["write-shared", "COMPLETED"],
+      ["write-shared-child", "PENDING"],
+      ["inspect-events", "COMPLETED"],
+      ["write-tests", "COMPLETED"],
+      ["write-docs", "PENDING"],
+      ["review-safe-wave", "PENDING"],
+    ],
+  );
+  assert.deepEqual(afterWave.execution.frontier, [
+    "write-shared-child",
+    "write-docs",
+  ]);
+  assert.equal(afterWave.status, "RUNNING");
+});
+
+test("Decision Room requires structured Evidence-backed judgment before consequential work reaches the frontier", () => {
+  const orchestrator = createHarness();
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission with a consequential decision",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: { context: { summary: "Decision Room Context" } },
+    actor: "mission-owner",
+    reason: "Capture decision Context",
+  });
+  const planned = orchestrator.execute(created.id, {
+    type: "ACCEPT_PLAN",
+    payload: {
+      plan: {
+        taskGraph: {
+          capacity: 4,
+          coordinationRequired: true,
+          assignments: [
+            {
+              ...boundedAssignment,
+              id: "choose-event-seam",
+              goal: "Choose the event-sourced execution seam",
+              dependsOn: [],
+              requiresDecision: true,
+              workKind: "architecture",
+              risk: "high",
+            },
+            {
+              ...boundedAssignment,
+              id: "review-event-seam",
+              goal: "Review the chosen event seam",
+              dependsOn: ["choose-event-seam"],
+              workKind: "review",
+              risk: "high",
+            },
+          ],
+        },
+      },
+    },
+    actor: "mission-owner",
+    reason: "Accept a plan with consequential architecture work",
+  });
+
+  assert.deepEqual(planned.execution.frontier, []);
+  assert.deepEqual(planned.execution.decisionRequiredAssignmentIds, [
+    "choose-event-seam",
+  ]);
+  assert.deepEqual(planned.allowedActions, [
+    "open_decision_room",
+    "revise_context",
+    "block_mission",
+    "cancel_mission",
+  ]);
+
+  const room = {
+    id: "decision-room:event-seam",
+    assignmentId: "choose-event-seam",
+    assignmentAttempt: 1,
+    question: "Where should execution-wave invariants live?",
+    participantRoles: ["orchestrator", "sol_architect", "sol_reviewer"],
+    participantInputs: [
+      {
+        roleId: "orchestrator",
+        contribution: "Keep execution sequencing auditable",
+        evidenceRefs: ["evidence://event-seam-options"],
+      },
+      {
+        roleId: "sol_architect",
+        contribution: "Localize the event replay invariants",
+        evidenceRefs: ["evidence://event-seam-options"],
+      },
+      {
+        roleId: "sol_reviewer",
+        contribution: "Require forged-event replay coverage",
+        evidenceRefs: ["evidence://event-seam-options"],
+      },
+    ],
+    expectedOutput: "A reusable event-seam decision Artifact",
+    alternatives: [
+      {
+        id: "inline",
+        label: "Inline in the Orchestrator",
+        tradeoffs: ["Fewer files", "Lower locality"],
+      },
+      {
+        id: "deep-module",
+        label: "Dedicated deep execution module",
+        tradeoffs: ["Small extra seam", "Higher replay locality"],
+      },
+    ],
+    recommendation: {
+      alternativeId: "deep-module",
+      rationale: "Keep graph and wave invariants in one replayable module",
+    },
+    validationPlan: [
+      "Replay forged wave events",
+      "Run concurrent ownership contract tests",
+    ],
+  };
+
+  assert.throws(
+    () =>
+      orchestrator.execute(created.id, {
+        type: "OPEN_DECISION_ROOM",
+        payload: {
+          decisionRoom: {
+            ...room,
+            alternatives: [{ id: "inline", label: "Inline", tradeoffs: [] }],
+          },
+        },
+        actor: "mission-owner",
+        reason: "Attempt to open an incomplete Decision Room",
+        evidenceRefs: ["evidence://event-seam-options"],
+      }),
+    /Decision Room alternative trade-offs are required/,
+  );
+
+  const opened = orchestrator.execute(created.id, {
+    type: "OPEN_DECISION_ROOM",
+    payload: { decisionRoom: room },
+    actor: "mission-owner",
+    reason: "Open the event-seam Decision Room",
+    evidenceRefs: ["evidence://event-seam-options"],
+  });
+  assert.deepEqual(opened.execution.decisionRooms, [
+    {
+      ...room,
+      inputEvidenceRefs: ["evidence://event-seam-options"],
+      status: "OPEN",
+      decision: null,
+      decisionArtifact: null,
+    },
+  ]);
+  assert.deepEqual(opened.allowedActions, [
+    "resolve_decision_room",
+    "revise_context",
+    "block_mission",
+    "cancel_mission",
+  ]);
+
+  const resolved = orchestrator.execute(created.id, {
+    type: "RESOLVE_DECISION_ROOM",
+    payload: {
+      decision: {
+        roomId: room.id,
+        assignmentAttempt: 1,
+        selectedAlternativeId: "deep-module",
+        rationale: "The replay invariants need one source of truth",
+        artifact: {
+          id: "decision-artifact:event-seam",
+          uri: "decision://event-seam",
+          summary: "Use a deep execution module with replay contracts",
+        },
+      },
+    },
+    actor: "mission-owner",
+    reason: "Resolve the event-seam Decision Room",
+  });
+  assert.deepEqual(resolved.execution.frontier, ["choose-event-seam"]);
+  assert.deepEqual(resolved.execution.decisionRooms[0].decision, {
+    assignmentAttempt: 1,
+    selectedAlternativeId: "deep-module",
+    rationale: "The replay invariants need one source of truth",
+    actor: "mission-owner",
+  });
+  assert.equal(resolved.execution.decisionRooms[0].status, "RESOLVED");
+  assert.deepEqual(resolved.allowedActions, [
+    "dispatch_execution_wave",
+    "revise_context",
+    "block_mission",
+    "cancel_mission",
+  ]);
+});
+
+test("independent reviewer findings return only owned work and its downstream review to correction", async () => {
+  const attempts = new Map();
+  const transportRequests = [];
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        const assignmentId = request.assignment.id;
+        const attempt = (attempts.get(assignmentId) ?? 0) + 1;
+        attempts.set(assignmentId, attempt);
+        transportRequests.push({
+          assignmentId,
+          attempt,
+          roleId: request.roleId,
+          permission: request.permission,
+        });
+        yield {
+          kind: "started",
+          runId: `run:${assignmentId}:${attempt}`,
+          occurredAt: `2026-08-08T10:0${attempt}:00.000Z`,
+        };
+        yield {
+          kind: "completed",
+          runId: `run:${assignmentId}:${attempt}`,
+          occurredAt: `2026-08-08T10:0${attempt}:30.000Z`,
+          summary: `Completed ${assignmentId} attempt ${attempt}`,
+          artifacts: [
+            {
+              name: `${assignmentId}-${attempt}`,
+              uri: `artifact://${assignmentId}/${attempt}`,
+              ...(assignmentId === "review-candidate"
+                ? {
+                    reviewOutcome: {
+                      outcome: "CHANGES_REQUESTED",
+                      candidateArtifactRefs:
+                        request.reviewContext.candidateArtifactRefs,
+                      findings: [
+                        {
+                          triggeringScenario:
+                            "build-a transport emits a terminal error",
+                          ownerAssignmentId: "build-a",
+                          summary:
+                            "Preserve Assignment ownership on the error event",
+                        },
+                      ],
+                    },
+                  }
+                : {}),
+            },
+          ],
+          evidence: [
+            {
+              ref: `evidence://${assignmentId}/${attempt}`,
+              kind: assignmentId === "review-candidate" ? "review" : "test",
+              summary: `Evidence for ${assignmentId} attempt ${attempt}`,
+            },
+          ],
+        };
+      },
+    },
+  });
+  const orchestrator = createHarness(createMemoryEventStore(), agentRouter);
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission for targeted review correction",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: { context: { summary: "Targeted correction Context" } },
+    actor: "mission-owner",
+    reason: "Capture targeted correction Context",
+  });
+  const writableTask = (id, writePath) => ({
+    ...boundedAssignment,
+    id,
+    goal: `Build ${id}`,
+    dependsOn: [],
+    workKind: "implementation",
+    risk: "medium",
+    effectivePermission: "workspace-write",
+    ownershipBoundary: {
+      readPaths: [writePath],
+      writePaths: [writePath],
+    },
+  });
+  orchestrator.execute(created.id, {
+    type: "ACCEPT_PLAN",
+    payload: {
+      plan: {
+        taskGraph: {
+          capacity: 4,
+          coordinationRequired: true,
+          assignments: [
+            writableTask("build-a", "codex-mission-control/src/a"),
+            writableTask("build-b", "codex-mission-control/src/b"),
+            {
+              ...boundedAssignment,
+              id: "review-candidate",
+              goal: "Independently review both build outputs",
+              dependsOn: ["build-a", "build-b"],
+              workKind: "review",
+              risk: "high",
+              expectedEvidence: ["Findings name scenario and owner"],
+            },
+          ],
+        },
+      },
+    },
+    actor: "mission-owner",
+    reason: "Accept a plan with independent review",
+  });
+
+  await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch both independent build Assignments",
+  });
+  const reviewed = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the independent review Assignment",
+  });
+  assert.equal(reviewed.status, "IN_REVIEW");
+  assert.deepEqual(
+    reviewed.execution.nodes.find(
+      (node) => node.assignment.id === "review-candidate",
+    ).agent,
+    {
+      roleId: "sol_reviewer",
+      roleName: "Sol Reviewer",
+      capability: "review",
+      effectivePermission: "read-only",
+      independent: true,
+    },
+  );
+
+  const changesRequested = orchestrator.execute(created.id, {
+    type: "REJECT_REVIEW",
+    payload: {
+      review: {
+        summary: "Replay loses the owner on one execution error path",
+        reviewerAssignmentId: "review-candidate",
+        findings: [
+          {
+            triggeringScenario: "build-a transport emits a terminal error",
+            ownerAssignmentId: "build-a",
+            summary: "Preserve Assignment ownership on the error event",
+          },
+        ],
+      },
+    },
+    actor: "agent:sol_reviewer",
+    reason: "Independent review returned one owned finding",
+    evidenceRefs: ["evidence://review-candidate/1"],
+  });
+
+  assert.equal(changesRequested.status, "CHANGES_REQUESTED");
+  assert.deepEqual(changesRequested.changeRequest.affectedAssignmentIds, [
+    "build-a",
+  ]);
+  assert.deepEqual(
+    changesRequested.execution.nodes.map((node) => [
+      node.assignment.id,
+      node.status,
+    ]),
+    [
+      ["build-a", "CHANGES_REQUESTED"],
+      ["build-b", "COMPLETED"],
+      ["review-candidate", "PENDING"],
+    ],
+  );
+  assert.deepEqual(changesRequested.execution.frontier, ["build-a"]);
+  assert.ok(
+    changesRequested.invalidatedArtifactRefs.includes("artifact://build-a/1"),
+  );
+  assert.ok(
+    changesRequested.invalidatedArtifactRefs.includes(
+      "artifact://review-candidate/1",
+    ),
+  );
+  assert.ok(
+    !changesRequested.invalidatedArtifactRefs.includes("artifact://build-b/1"),
+  );
+  assert.deepEqual(changesRequested.allowedActions, [
+    "dispatch_execution_wave",
+    "revise_context",
+    "block_mission",
+    "cancel_mission",
+  ]);
+
+  const corrected = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch only the owned correction",
+  });
+  assert.deepEqual(corrected.execution.frontier, ["review-candidate"]);
+  const rereviewed = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Re-run the downstream independent review",
+  });
+
+  assert.equal(rereviewed.status, "IN_REVIEW");
+  assert.deepEqual(
+    rereviewed.execution.nodes.map((node) => [
+      node.assignment.id,
+      node.artifacts[0].uri,
+    ]),
+    [
+      ["build-a", "artifact://build-a/2"],
+      ["build-b", "artifact://build-b/1"],
+      ["review-candidate", "artifact://review-candidate/2"],
+    ],
+  );
+  assert.deepEqual(transportRequests, [
+    {
+      assignmentId: "build-a",
+      attempt: 1,
+      roleId: "terra_builder",
+      permission: "workspace-write",
+    },
+    {
+      assignmentId: "build-b",
+      attempt: 1,
+      roleId: "terra_builder",
+      permission: "workspace-write",
+    },
+    {
+      assignmentId: "review-candidate",
+      attempt: 1,
+      roleId: "sol_reviewer",
+      permission: "read-only",
+    },
+    {
+      assignmentId: "build-a",
+      attempt: 2,
+      roleId: "terra_builder",
+      permission: "workspace-write",
+    },
+    {
+      assignmentId: "review-candidate",
+      attempt: 2,
+      roleId: "sol_reviewer",
+      permission: "read-only",
+    },
+  ]);
 });

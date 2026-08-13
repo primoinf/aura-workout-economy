@@ -21,14 +21,78 @@ import {
   humanize,
   renderApprovalRoomContent,
 } from "./approval-room-view.js";
+import { renderTaskExecutionContent } from "./execution-room-view.js";
+import { nextDecisionRoomInput } from "./task-graph-execution.js";
 
-const agentTransport = globalThis.codexAgentTransport ?? null;
-const agentRouter = agentTransport
-  ? createAgentRoutingAdapter({ transport: agentTransport })
-  : null;
-const agentRoutingConnected = Boolean(agentRouter);
+const liveAgentTransport = globalThis.codexAgentTransport ?? null;
+const localObservedTransport = {
+  async *run({ roleId, assignment, reviewContext }) {
+    const runId = `local-run:${assignment.id}:${crypto.randomUUID()}`;
+    const startedAt = new Date().toISOString();
+    yield {
+      kind: "started",
+      runId,
+      occurredAt: startedAt,
+      model: {
+        name: "local-observed-simulator",
+        reasoningEffort: "deterministic",
+      },
+    };
+    const completedAt = new Date().toISOString();
+    const artifactUri = `local://assignments/${assignment.id}/${runId}`;
+    const evidenceRef = `${artifactUri}/evidence`;
+    yield {
+      kind: "completed",
+      runId,
+      occurredAt: completedAt,
+      summary: `${roleId} completed ${assignment.id} in the local observable simulator`,
+      artifacts: [
+        {
+          name:
+            assignment.workKind === "review"
+              ? `Review report for ${assignment.id}`
+              : `Candidate output for ${assignment.id}`,
+          uri: artifactUri,
+          summary: `Event-backed local output from ${roleId}`,
+          content: JSON.stringify(
+            {
+              assignmentId: assignment.id,
+              roleId,
+              runId,
+              externalMutation: "none",
+            },
+            null,
+            2,
+          ),
+          ...(assignment.workKind === "review"
+            ? {
+                reviewOutcome: {
+                  outcome: "PASSED",
+                  candidateArtifactRefs:
+                    reviewContext?.candidateArtifactRefs ?? [],
+                  findings: [],
+                },
+              }
+            : {}),
+        },
+      ],
+      evidence: [
+        {
+          ref: evidenceRef,
+          kind: assignment.workKind === "review" ? "review" : "local-run",
+          summary: `Observed ${assignment.workKind} completion from ${roleId}`,
+        },
+      ],
+    };
+  },
+};
+const agentRouter = createAgentRoutingAdapter({
+  transport: liveAgentTransport ?? localObservedTransport,
+});
+const agentRoutingConnected = Boolean(liveAgentTransport);
+const eventStore = createLocalStorageEventStore();
 const orchestrator = createMissionOrchestrator({
-  eventStore: createLocalStorageEventStore(),
+  eventStore,
   writeCoordinator: createBrowserWriteCoordinator(),
   agentRouter,
 });
@@ -37,6 +101,20 @@ const app = document.querySelector("#app");
 
 function localEventRef(mission, kind) {
   return `local://missions/${mission.id}/context-${mission.contextPackVersion}/${kind}-event-${mission.events.length + 1}`;
+}
+
+function decisionRoomInputForMission(mission) {
+  const input = nextDecisionRoomInput(mission.execution);
+  if (!input) {
+    throw new Error("No Decision Room Assignment is awaiting input.");
+  }
+  return {
+    assignmentId: input.assignmentId,
+    evidenceRefs:
+      input.evidenceRefs.length > 0
+        ? input.evidenceRefs
+        : [localEventRef(mission, "decision-input-evidence")],
+  };
 }
 
 const nextSteps = {
@@ -57,8 +135,8 @@ const nextSteps = {
     label: "Accept Plan",
     eyebrow: "Plan",
     description:
-      "Approve one bounded Assignment followed by review and validation.",
-    reason: "Accepted the bounded no-release execution plan",
+      "Approve a dependency-aware Task Graph with bounded ownership and independent review.",
+    reason: "Accepted the safe multi-agent execution plan",
     payload: (mission) => {
       const authority = mission.brief.mutationAuthority;
       const workspaceWrite = authority
@@ -71,47 +149,149 @@ const nextSteps = {
             .map((path) => path.trim())
             .filter(Boolean)
         : ["codex-mission-control"];
+      const assignment = (id, goal, overrides = {}) => ({
+        id: `${id}:${mission.id}:context-${mission.contextPackVersion}`,
+        goal,
+        acceptanceCriteria: mission.brief.acceptanceCriteria,
+        contextSlice: mission.context,
+        ownershipBoundary: {
+          readPaths: authorizedRoots,
+          writePaths: [],
+        },
+        effectivePermission: "read-only",
+        budget: { maxTurns: 4, maxMinutes: 15 },
+        expectedEvidence: mission.brief.acceptanceCriteria,
+        workKind: "deterministic",
+        risk: "low",
+        dependsOn: [],
+        ...overrides,
+      });
+      const inspectId = `inspect:${mission.id}:context-${mission.contextPackVersion}`;
+      const decisionId = `architect:${mission.id}:context-${mission.contextPackVersion}`;
+      const buildId = `build:${mission.id}:context-${mission.contextPackVersion}`;
       return {
-      plan: {
+        plan: {
           steps: [
-            "Route one bounded Assignment",
+            "Inspect bounded Context",
+            "Resolve consequential architecture judgment",
+            "Build within declared ownership",
             "Independent review",
             "Validation",
             "Learning",
           ],
-          assignment: {
-            id: `assignment:${mission.id}:context-${mission.contextPackVersion}`,
-            goal: mission.brief.goal,
-            acceptanceCriteria: mission.brief.acceptanceCriteria,
-            contextSlice: mission.context,
-            ownershipBoundary: {
-              readPaths: authorizedRoots,
-              writePaths: workspaceWrite ? authorizedRoots : [],
-            },
-            effectivePermission: workspaceWrite
-              ? "workspace-write"
-              : "read-only",
-            budget: { maxTurns: 4, maxMinutes: 15 },
-            expectedEvidence: mission.brief.acceptanceCriteria,
-            workKind: workspaceWrite ? "implementation" : "deterministic",
-            risk: mission.brief.risk,
+          taskGraph: {
+            capacity: 4,
+            coordinationRequired: true,
+            assignments: [
+              assignment(
+                "inspect",
+                `Inspect the bounded Context for ${mission.brief.goal}`,
+              ),
+              assignment(
+                "architect",
+                "Choose the safest implementation seam",
+                {
+                  dependsOn: [inspectId],
+                  workKind: "architecture",
+                  risk: "high",
+                  requiresDecision: true,
+                },
+              ),
+              assignment("build", mission.brief.goal, {
+                dependsOn: [inspectId, decisionId],
+                workKind: workspaceWrite ? "implementation" : "deterministic",
+                risk: workspaceWrite ? "medium" : "low",
+                effectivePermission: workspaceWrite
+                  ? "workspace-write"
+                  : "read-only",
+                ownershipBoundary: {
+                  readPaths: authorizedRoots,
+                  writePaths: workspaceWrite ? authorizedRoots : [],
+                },
+              }),
+              assignment(
+                "review",
+                "Independently review the completed candidate",
+                {
+                  dependsOn: [buildId],
+                  workKind: "review",
+                  risk: "high",
+                  expectedEvidence: [
+                    "Findings identify a triggering scenario and owner",
+                  ],
+                },
+              ),
+            ],
           },
-      },
+        },
+      };
+    },
+    evidenceRefs: [],
+  },
+  open_decision_room: {
+    label: "Open Decision Room",
+    eyebrow: "Consequential Judgment",
+    description:
+      "Record the question, participants, Evidence, alternatives, trade-offs, recommendation, and validation plan.",
+    reason: "Opened a structured Decision Room for consequential work",
+    payload: () => {
+      throw new Error(
+        "Decision Room input must be submitted through the structured form.",
+      );
+    },
+    evidenceRefs: (mission) =>
+      decisionRoomInputForMission(mission).evidenceRefs,
+  },
+  resolve_decision_room: {
+    label: "Resolve Decision Room",
+    eyebrow: "Human Decision",
+    description:
+      "Select the recorded recommendation with an explicit human rationale.",
+    reason: "Mission owner resolved the structured Decision Room",
+    payload: () => {
+      throw new Error(
+        "Decision Room resolution must be submitted through the structured form.",
+      );
+    },
+    evidenceRefs: [],
+  },
+  dispatch_execution_wave: {
+    label: "Dispatch Safe Wave",
+    eyebrow: "Execution Frontier",
+    description:
+      "Route the current unblocked frontier within worker capacity and ownership constraints.",
+    reason: "Dispatched the current safe execution frontier",
+    payload: () => ({}),
+    evidenceRefs: [],
+  },
+  retry_execution_assignment: {
+    label: "Retry Terminal Assignment",
+    eyebrow: "Explicit Recovery",
+    description:
+      "Return one blocked or failed Assignment to the frontier after its required input is available.",
+    reason: "Mission owner authorized an explicit Assignment retry",
+    payload: (mission) => {
+      const node = mission.execution.nodes.find((candidate) =>
+        ["BLOCKED", "ERROR"].includes(candidate.status),
+      );
+      return {
+        retry: {
+          assignmentId: node.assignment.id,
+          summary: `Retry ${node.assignment.id} after resolving its terminal outcome`,
+        },
       };
     },
     evidenceRefs: [],
   },
   start_run: {
-    label: agentRoutingConnected
-      ? "Route Bounded Assignment"
-      : "Start Mock Run",
+    label: "Route Bounded Assignment",
     eyebrow: "Run",
     description: agentRoutingConnected
       ? "Dispatch the declared Assignment through the connected Codex transport."
-      : "Start the explicit Ticket 01 local mock while agent transport is disconnected.",
+      : "Dispatch the declared Assignment through the local observable simulator without external mutation.",
     reason: agentRoutingConnected
       ? "Dispatched the planned bounded Assignment"
-      : "Started the bounded local mock run",
+      : "Dispatched the bounded Assignment to the local observable simulator",
     payload: () => ({
       run: { agentRole: "terra-builder-mock", mode: "local-only" },
     }),
@@ -148,35 +328,76 @@ const nextSteps = {
   pass_review: {
     label: "Pass Review",
     eyebrow: "Review Gate",
-    description: "Record a mocked independent review with no material findings.",
-    reason: "Mock independent review found no material issues",
-    payload: (mission) => ({
-      review: {
-        summary: "No material correctness or security findings",
-        details: {
-          gate: "Review Gate",
-          candidateRef: mission.artifact?.uri ?? null,
-          evidenceRef: localEventRef(mission, "review-pass"),
-          outcome: "passed",
-          method: "Local event-backed review",
+    description:
+      "Record the completed independent Sol Reviewer outcome with no material findings.",
+    reason: "Independent Sol Reviewer found no material issues",
+    payload: (mission) => {
+      if (!mission.execution) {
+        return {
+          review: {
+            summary: "No material correctness or security findings",
+            details: { outcome: "passed", method: "Observed review" },
+          },
+        };
+      }
+      const reviewerNode = mission.execution.nodes.find(
+        (node) => node.assignment.workKind === "review",
+      );
+      return {
+        review: {
+          summary: "Independent reviewer outcome passed",
+          reviewerAssignmentId: reviewerNode.assignment.id,
+          ...structuredClone(reviewerNode.reviewOutcome),
         },
-      },
-    }),
-    evidenceRefs: (mission) => [localEventRef(mission, "review-pass")],
+      };
+    },
+    evidenceRefs: (mission) =>
+      mission.executionReviewEvidenceRefs?.length
+        ? mission.executionReviewEvidenceRefs
+        : [localEventRef(mission, "review-pass")],
+    actor: (mission) =>
+      mission.execution ? "agent:sol_reviewer" : "mission-owner",
   },
   reject_review: {
     label: "Request Review Changes",
     eyebrow: "Review Gate",
     description:
       "Record a distinct review failure and return the candidate to correction.",
-    reason: "Independent review requested an idempotency correction",
-    payload: () => ({
-      review: {
-        summary: "Review found a correction that must be resolved",
-        findings: ["Regenerate the affected Artifact and Evidence"],
-      },
-    }),
-    evidenceRefs: (mission) => [localEventRef(mission, "review-failure")],
+    reason: "Independent review requested owned corrections",
+    payload: (mission) => {
+      if (!mission.execution) {
+        return {
+          review: {
+            summary: "Review found a correction that must be resolved",
+            findings: ["Regenerate the affected Artifact and Evidence"],
+          },
+        };
+      }
+      const reviewerNode = mission.execution.nodes.find(
+        (node) =>
+          node.assignment.workKind === "review" &&
+          node.status === "COMPLETED",
+      );
+      return {
+        review: {
+          summary: "Independent reviewer requested owned corrections",
+          reviewerAssignmentId: reviewerNode.assignment.id,
+          findings: structuredClone(reviewerNode.reviewOutcome.findings),
+        },
+      };
+    },
+    evidenceRefs: (mission) => {
+      const reviewerNode = mission.execution?.nodes.find(
+        (node) =>
+          node.assignment.workKind === "review" &&
+          node.status === "COMPLETED",
+      );
+      return reviewerNode?.evidenceRefs?.length
+        ? reviewerNode.evidenceRefs
+        : [localEventRef(mission, "review-failure")];
+    },
+    actor: (mission) =>
+      mission.execution ? "agent:sol_reviewer" : "mission-owner",
   },
   pass_validation: {
     label: "Pass Validation",
@@ -396,7 +617,7 @@ function renderShell(content, view) {
           <span class="sidebar-team-dot ${commandDeck.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}" aria-hidden="true"></span>
           <div>
             <strong>${commandDeck.metrics.configuredAgents} configured roles</strong>
-            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : agentRoutingConnected ? "Agent transport connected · awaiting observations" : "Agent transport disconnected"}</small>
+            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : agentRoutingConnected ? "Agent transport connected · awaiting observations" : "Local observable simulator · awaiting observations"}</small>
           </div>
         </div>
         <div class="local-mode">
@@ -476,7 +697,7 @@ function renderOverview() {
         <article class="metric-card accent-cyan">
           <span>Configured roles</span>
           <strong>${model.metrics.configuredAgents}</strong>
-          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : agentRoutingConnected ? "Transport connected · no Run observations yet" : "No Assignment / Run observations"}</small>
+          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : agentRoutingConnected ? "Transport connected · no Run observations yet" : "Local simulator ready · no Run observations yet"}</small>
         </article>
         <article class="metric-card accent-green">
           <span>Active Missions</span>
@@ -501,7 +722,7 @@ function renderOverview() {
             <p class="eyebrow">CONFIGURED SQUAD</p>
             <h2>ทีม Codex</h2>
           </div>
-          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : agentRoutingConnected ? "Transport connected · awaiting Run" : "Configuration only · transport disconnected"}</span>
+          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : agentRoutingConnected ? "Transport connected · awaiting Run" : "Local observable simulator · awaiting Run"}</span>
         </div>
         <div class="team-grid">${model.team.map(renderTeamCard).join("")}</div>
       </section>
@@ -571,7 +792,7 @@ function renderTeamCard(role) {
       </div>
       <div class="team-observation">
         <span>${escapeHtml(modelMetadata)}</span>
-        <small>${escapeHtml(role.latestEvidence ?? "No observed Evidence")}</small>
+        <small>${escapeHtml(role.latestEvidence ?? "No observed Evidence")} · ${escapeHtml(role.queuePosition ? `Queue ${role.queuePosition}` : "Not queued")}</small>
       </div>
     </article>
   `;
@@ -641,6 +862,63 @@ function renderSignal(signal) {
       </div>
       <time datetime="${escapeHtml(signal.occurredAt)}">${escapeHtml(formatDate(signal.occurredAt))}</time>
     </article>
+  `;
+}
+
+function renderDecisionRoomActionForm(mission, action, step) {
+  if (action === "open_decision_room") {
+    const { assignmentId, evidenceRefs } =
+      decisionRoomInputForMission(mission);
+    return `
+      <form class="action-card decision-action-card" id="decision-room-action-form" data-decision-action="open_decision_room">
+        <div>
+          <p class="eyebrow">${escapeHtml(step.eyebrow)}</p>
+          <h2 id="next-action-title">${escapeHtml(step.label)}</h2>
+          <p>${escapeHtml(step.description)}</p>
+          <p class="decision-form-assignment">Assignment ${escapeHtml(assignmentId)}</p>
+        </div>
+        <div class="form-grid decision-form-grid">
+          <label class="field span-2"><span>Decision question</span><textarea name="question" rows="2" required placeholder="What consequential choice must be made?"></textarea></label>
+          <label class="field span-2"><span>Expected decision Artifact</span><input name="expectedOutput" required placeholder="What reusable output must this room produce?" /></label>
+          <label class="field"><span>Orchestrator input</span><textarea name="orchestratorInput" rows="3" required placeholder="Coordination constraints and recommendation"></textarea></label>
+          <label class="field"><span>Sol Architect input</span><textarea name="architectInput" rows="3" required placeholder="Architecture judgment and boundary risks"></textarea></label>
+          <label class="field span-2"><span>Sol Reviewer input</span><textarea name="reviewerInput" rows="3" required placeholder="Independent failure scenarios and verification needs"></textarea></label>
+          <label class="field span-2"><span>Input Evidence (one reference per line)</span><textarea name="inputEvidence" rows="3" required>${escapeHtml(evidenceRefs.join("\n"))}</textarea></label>
+          <label class="field"><span>Alternative A label</span><input name="alternativeALabel" required placeholder="First viable option" /></label>
+          <label class="field"><span>Alternative B label</span><input name="alternativeBLabel" required placeholder="Second viable option" /></label>
+          <label class="field"><span>Alternative A trade-offs (one per line)</span><textarea name="alternativeATradeoffs" rows="4" required></textarea></label>
+          <label class="field"><span>Alternative B trade-offs (one per line)</span><textarea name="alternativeBTradeoffs" rows="4" required></textarea></label>
+          <label class="field"><span>Recommendation</span><select name="recommendation" required><option value="" selected disabled>Select an alternative</option><option value="alternative-a">Alternative A</option><option value="alternative-b">Alternative B</option></select></label>
+          <label class="field"><span>Recommendation rationale</span><textarea name="recommendationRationale" rows="3" required></textarea></label>
+          <label class="field span-2"><span>Validation plan (one step per line)</span><textarea name="validationPlan" rows="4" required></textarea></label>
+        </div>
+        <button class="primary-button action-button" type="submit">Open Decision Room <span aria-hidden="true">→</span></button>
+      </form>
+    `;
+  }
+
+  const room = mission.execution.decisionRooms.find(
+    (candidate) => candidate.status === "OPEN",
+  );
+  return `
+    <form class="action-card decision-action-card" id="decision-room-action-form" data-decision-action="resolve_decision_room">
+      <div>
+        <p class="eyebrow">${escapeHtml(step.eyebrow)}</p>
+        <h2 id="next-action-title">${escapeHtml(room.question)}</h2>
+        <p>Expected output: ${escapeHtml(room.expectedOutput)}</p>
+      </div>
+      <fieldset class="decision-choice-fieldset">
+        <legend>Select the human decision</legend>
+        ${room.alternatives
+          .map(
+            (alternative) => `<label><input type="radio" name="selectedAlternativeId" value="${escapeHtml(alternative.id)}" required /> <span><strong>${escapeHtml(alternative.label)}</strong><small>${escapeHtml(alternative.tradeoffs.join(" · "))}</small></span></label>`,
+          )
+          .join("")}
+      </fieldset>
+      <label class="field"><span>Decision rationale</span><textarea name="decisionRationale" rows="3" required></textarea></label>
+      <label class="field"><span>Decision Artifact summary</span><textarea name="artifactSummary" rows="3" required placeholder="Summarize the reusable conclusion and its validation commitment"></textarea></label>
+      <button class="primary-button action-button" type="submit">Resolve and record Artifact <span aria-hidden="true">→</span></button>
+    </form>
   `;
 }
 
@@ -745,13 +1023,15 @@ function renderMissionDetail(mission) {
         </ol>
       </section>
 
+      ${renderTaskExecutionContent(flow.execution)}
+
       <section class="agent-lanes-panel" aria-labelledby="agent-lanes-title">
         <div class="section-heading compact">
           <div>
             <p class="eyebrow">CONFIGURED HAND-OFFS</p>
             <h2 id="agent-lanes-title">Agent lanes</h2>
           </div>
-          <span class="honesty-note ${mission.agent ? "is-observed" : ""}"><span></span> ${mission.agent ? "Replayed Assignment / Run observations" : "No Assignment / Run observations"}</span>
+          <span class="honesty-note ${mission.agent || flow.execution?.observed ? "is-observed" : ""}"><span></span> ${mission.agent || flow.execution?.observed ? "Replayed Assignment / Run observations" : "No Assignment / Run observations"}</span>
         </div>
         <div class="agent-lanes">
           ${flow.team.map(renderAgentLane).join("")}
@@ -799,16 +1079,24 @@ function renderMissionDetail(mission) {
               `
               : step
               ? `
-                <section class="action-card" aria-labelledby="next-action-title">
-                  <div>
-                    <p class="eyebrow">${escapeHtml(step.eyebrow)}</p>
-                    <h2 id="next-action-title">${escapeHtml(step.label)}</h2>
-                    <p>${escapeHtml(step.description)}</p>
-                  </div>
-                  <button class="primary-button action-button" type="button" data-run-action="${escapeHtml(nextAction)}">
-                    ${escapeHtml(step.label)} <span aria-hidden="true">→</span>
-                  </button>
-                </section>
+                ${
+                  ["open_decision_room", "resolve_decision_room"].includes(
+                    nextAction,
+                  )
+                    ? renderDecisionRoomActionForm(mission, nextAction, step)
+                    : `
+                      <section class="action-card" aria-labelledby="next-action-title">
+                        <div>
+                          <p class="eyebrow">${escapeHtml(step.eyebrow)}</p>
+                          <h2 id="next-action-title">${escapeHtml(step.label)}</h2>
+                          <p>${escapeHtml(step.description)}</p>
+                        </div>
+                        <button class="primary-button action-button" type="button" data-run-action="${escapeHtml(nextAction)}">
+                          ${escapeHtml(step.label)} <span aria-hidden="true">→</span>
+                        </button>
+                      </section>
+                    `
+                }
                 ${
                   secondaryActions.length
                     ? `
@@ -922,7 +1210,7 @@ function renderAgentLane(role) {
       </div>
       <div class="lane-track" aria-hidden="true"><span></span></div>
       <span class="lane-state">${escapeHtml(role.assignment)}</span>
-      <span class="lane-connection">${escapeHtml(role.runtimeStatus === "DISCONNECTED" ? role.connection : `${role.runtimeStatus}${role.elapsedTime ? ` · ${role.elapsedTime}` : ""}`)}</span>
+      <span class="lane-connection">${escapeHtml(role.runtimeStatus === "DISCONNECTED" ? role.connection : `${role.runtimeStatus}${role.elapsedTime ? ` · ${role.elapsedTime}` : ""}${role.queuePosition ? ` · Queue ${role.queuePosition}` : ""}`)}</span>
     </article>
   `;
 }
@@ -1101,12 +1389,109 @@ function wireShellEvents() {
   document
     .querySelector("#approval-decision-form")
     ?.addEventListener("submit", handleApprovalDecision);
+  document
+    .querySelector("#decision-room-action-form")
+    ?.addEventListener("submit", handleDecisionRoomAction);
 
   document.querySelectorAll("[data-run-action]").forEach((button) => {
     button.addEventListener("click", (event) => {
       const action = event.currentTarget.dataset.runAction;
       advanceMission(action);
     });
+  });
+}
+
+async function handleDecisionRoomAction(event) {
+  event.preventDefault();
+  const mission = orchestrator.getMission(activeMissionId);
+  const action = event.currentTarget.dataset.decisionAction;
+  const form = new FormData(event.currentTarget);
+  const value = (name) => String(form.get(name) ?? "").trim();
+  const lines = (name) =>
+    value(name)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+  if (action === "open_decision_room") {
+    const { assignmentId } = decisionRoomInputForMission(mission);
+    const evidenceRefs = lines("inputEvidence");
+    const participantRoles = [
+      "orchestrator",
+      "sol_architect",
+      "sol_reviewer",
+    ];
+    await advanceMission(action, {
+      evidenceRefs,
+      payload: {
+        decisionRoom: {
+          id: `decision-room:${assignmentId}:event-${mission.events.length + 1}`,
+          assignmentId,
+          assignmentAttempt:
+            mission.execution.nodes.find(
+              (node) => node.assignment.id === assignmentId,
+            ).attempt + 1,
+          question: value("question"),
+          participantRoles,
+          participantInputs: [
+            {
+              roleId: "orchestrator",
+              contribution: value("orchestratorInput"),
+              evidenceRefs,
+            },
+            {
+              roleId: "sol_architect",
+              contribution: value("architectInput"),
+              evidenceRefs,
+            },
+            {
+              roleId: "sol_reviewer",
+              contribution: value("reviewerInput"),
+              evidenceRefs,
+            },
+          ],
+          expectedOutput: value("expectedOutput"),
+          alternatives: [
+            {
+              id: "alternative-a",
+              label: value("alternativeALabel"),
+              tradeoffs: lines("alternativeATradeoffs"),
+            },
+            {
+              id: "alternative-b",
+              label: value("alternativeBLabel"),
+              tradeoffs: lines("alternativeBTradeoffs"),
+            },
+          ],
+          recommendation: {
+            alternativeId: value("recommendation"),
+            rationale: value("recommendationRationale"),
+          },
+          validationPlan: lines("validationPlan"),
+        },
+      },
+    });
+    return;
+  }
+
+  const room = mission.execution.decisionRooms.find(
+    (candidate) => candidate.status === "OPEN",
+  );
+  await advanceMission(action, {
+    payload: {
+      decision: {
+        roomId: room.id,
+        assignmentAttempt: room.assignmentAttempt,
+        selectedAlternativeId: value("selectedAlternativeId"),
+        rationale: value("decisionRationale"),
+        artifact: {
+          id: `decision-artifact:${room.id}:event-${mission.events.length + 1}`,
+          uri: `local://missions/${mission.id}/decisions/${room.id}/event-${mission.events.length + 1}`,
+          summary: value("artifactSummary"),
+        },
+      },
+    },
+    evidenceRefs: [],
   });
 }
 
@@ -1190,7 +1575,7 @@ async function handleCreateMission(event) {
   }
 }
 
-async function advanceMission(action) {
+async function advanceMission(action, overrides = {}) {
   const mission = orchestrator.getMission(activeMissionId);
   const step = nextSteps[action];
   if (!step) return;
@@ -1205,27 +1590,36 @@ async function advanceMission(action) {
 
   try {
     const evidenceRefs =
-      typeof step.evidenceRefs === "function"
+      overrides.evidenceRefs ??
+      (typeof step.evidenceRefs === "function"
         ? step.evidenceRefs(mission)
-        : step.evidenceRefs;
+        : step.evidenceRefs);
+    const actor =
+      typeof step.actor === "function"
+        ? step.actor(mission)
+        : (step.actor ?? "mission-owner");
     const updated =
-      action === "start_run" && agentRoutingConnected
+      action === "dispatch_execution_wave"
+        ? await orchestrator.dispatchExecutionWave(mission.id, {
+            actor,
+            reason: step.reason,
+          })
+        : action === "start_run" && mission.plan?.assignment
         ? await orchestrator.dispatchAssignment(mission.id, {
             assignment: mission.plan.assignment,
-            actor: "mission-owner",
+            actor,
             reason: step.reason,
           })
         : action === "start_correction" &&
-            agentRoutingConnected &&
             mission.assignment
           ? await orchestrator.dispatchCorrection(mission.id, {
-              actor: "mission-owner",
+              actor,
               reason: step.reason,
             })
         : await orchestrator.execute(mission.id, {
             type: MISSION_COMMAND_BY_ACTION[action],
-            payload: step.payload(mission),
-            actor: "mission-owner",
+            payload: overrides.payload ?? step.payload(mission),
+            actor,
             reason: step.reason,
             evidenceRefs,
           });
@@ -1287,4 +1681,5 @@ window.addEventListener("popstate", () => {
   focusCurrentView();
 });
 
+eventStore.subscribe(() => render());
 render();

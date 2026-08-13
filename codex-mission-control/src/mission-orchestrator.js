@@ -1,8 +1,22 @@
-import { assertValidAgentAssignment } from "./agent-assignment.js";
+import {
+  assertValidAgentAssignment,
+  canonicalOwnershipPath,
+} from "./agent-assignment.js";
+import { routeAgentAssignment } from "./agent-routing-adapter.js";
 import {
   artifactHasInspectableDetail,
   artifactReference,
 } from "./artifact-inspection.js";
+import {
+  applyTaskReviewFindings,
+  createTaskExecution,
+  interruptTaskExecution,
+  planTaskExecutionWave,
+  projectTaskExecutionEvent,
+  resumeInterruptedTaskExecution,
+  taskExecutionAllowedActions,
+  writableAssignmentsOverlap,
+} from "./task-graph-execution.js";
 
 const REQUIRED_BRIEF_FIELDS = [
   "goal",
@@ -14,6 +28,9 @@ const REQUIRED_BRIEF_FIELDS = [
   "releaseRequired",
   "releaseAuthority",
 ];
+
+const GLOBAL_AGENT_CAPACITY = 4;
+const EVENT_SCHEMA_VERSION = 2;
 
 export const MISSION_STATUS_ORDER = Object.freeze([
   "BRIEF_ACCEPTED",
@@ -191,6 +208,28 @@ const CORRECTION_COMMANDS = {
   },
 };
 
+const EXECUTION_COMMANDS = {
+  OPEN_DECISION_ROOM: {
+    action: "open_decision_room",
+    from: ["PLANNED", "RUNNING", "CHANGES_REQUESTED"],
+    eventType: "DECISION_ROOM_OPENED",
+    field: "decisionRoom",
+    requiresEvidence: true,
+  },
+  RESOLVE_DECISION_ROOM: {
+    action: "resolve_decision_room",
+    from: ["PLANNED", "RUNNING", "CHANGES_REQUESTED"],
+    eventType: "DECISION_ROOM_RESOLVED",
+    field: "decision",
+  },
+  RETRY_EXECUTION_ASSIGNMENT: {
+    action: "retry_execution_assignment",
+    from: ["RUNNING", "CHANGES_REQUESTED"],
+    eventType: "EXECUTION_ASSIGNMENT_RETRIED",
+    field: "retry",
+  },
+};
+
 const CHANGES_REQUESTED_ACTIONS = Object.freeze([
   "start_correction",
   "revise_context",
@@ -209,6 +248,17 @@ function allowedActionsForMission(mission) {
   if (mission.status === "BLOCKED") {
     return ["resume_mission", "cancel_mission"];
   }
+  if (
+    mission.execution &&
+    ["PLANNED", "RUNNING", "CHANGES_REQUESTED"].includes(mission.status)
+  ) {
+    return appendUniqueStrings(
+      taskExecutionAllowedActions(mission.execution),
+      "revise_context",
+      "block_mission",
+      "cancel_mission",
+    );
+  }
   if (mission.status === "CHANGES_REQUESTED") {
     return [...CHANGES_REQUESTED_ACTIONS];
   }
@@ -224,7 +274,18 @@ function allowedActionsForMission(mission) {
   if (mission.status === "READY_TO_RELEASE") {
     return ["revise_context", "block_mission", "cancel_mission"];
   }
-
+  if (mission.status === "IN_REVIEW" && mission.execution) {
+    const reviewerOutcome = mission.execution.nodes.find(
+      (node) => node.assignment.workKind === "review",
+    )?.reviewOutcome?.outcome;
+    return appendUniqueStrings(
+      reviewerOutcome === "PASSED" ? ["pass_review"] : [],
+      reviewerOutcome === "CHANGES_REQUESTED" ? ["reject_review"] : [],
+      "revise_context",
+      "block_mission",
+      "cancel_mission",
+    );
+  }
   const actions = [];
   const primary = COMMAND_BY_STATUS[mission.status]?.action;
   const hasInterruptedAssignedRun =
@@ -259,7 +320,11 @@ function allowedActionsForMission(mission) {
 
 export const MISSION_COMMAND_BY_ACTION = Object.freeze(
   Object.fromEntries(
-    [...Object.entries(COMMANDS), ...Object.entries(CORRECTION_COMMANDS)].map(
+    [
+      ...Object.entries(COMMANDS),
+      ...Object.entries(CORRECTION_COMMANDS),
+      ...Object.entries(EXECUTION_COMMANDS),
+    ].map(
       ([commandType, command]) => [command.action, commandType],
     ),
   ),
@@ -270,7 +335,12 @@ const EVENT_PROJECTIONS = Object.fromEntries(
 );
 
 const CORRECTION_EVENT_TYPES = new Set(
-  Object.values(CORRECTION_COMMANDS).map((command) => command.eventType),
+  [
+    ...Object.values(CORRECTION_COMMANDS).map(
+      (command) => command.eventType,
+    ),
+    "CORRECTION_DISPATCHED",
+  ],
 );
 
 const AGENT_EVENT_TYPE_BY_OBSERVATION = Object.freeze({
@@ -286,8 +356,96 @@ const AGENT_EVENT_TYPES = new Set([
   "AGENT_RUN_ERROR",
 ]);
 
+const EXECUTION_EVENT_TYPE_BY_OBSERVATION = Object.freeze({
+  RUN_STARTED: "EXECUTION_RUN_STARTED",
+  RUN_UPDATED: "EXECUTION_RUN_UPDATED",
+  RUN_COMPLETED: "EXECUTION_RUN_COMPLETED",
+  RUN_BLOCKED: "EXECUTION_RUN_BLOCKED",
+});
+
+const EXECUTION_EVENT_TYPES = new Set([
+  "EXECUTION_WAVE_DISPATCHED",
+  ...Object.values(EXECUTION_EVENT_TYPE_BY_OBSERVATION),
+  "EXECUTION_RUN_ERROR",
+  "EXECUTION_TRANSPORT_SETTLED",
+  ...Object.values(EXECUTION_COMMANDS).map((command) => command.eventType),
+]);
+
 function clone(value) {
   return structuredClone(value);
+}
+
+function sameValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function normalizeLegacyOwnershipPath(path) {
+  if (typeof path !== "string") {
+    return path;
+  }
+  let normalized = path.trim().replaceAll("\\", "/");
+  while (normalized.startsWith("./")) {
+    normalized = normalized.slice(2);
+  }
+  normalized = normalized.replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+  normalized = normalized
+    .split("/")
+    .filter((segment) => segment !== ".")
+    .join("/");
+  return normalized;
+}
+
+function normalizeLegacyAssignment(assignment) {
+  if (!assignment?.ownershipBoundary) {
+    return assignment;
+  }
+  const normalized = clone(assignment);
+  for (const field of ["readPaths", "writePaths"]) {
+    if (Array.isArray(normalized.ownershipBoundary[field])) {
+      normalized.ownershipBoundary[field] =
+        normalized.ownershipBoundary[field].map(normalizeLegacyOwnershipPath);
+    }
+  }
+  return normalized;
+}
+
+function normalizeLegacyAgent(agent) {
+  if (!agent || agent.roleId !== "sol_reviewer" || agent.independent === true) {
+    return agent;
+  }
+  return { ...clone(agent), independent: true };
+}
+
+function normalizeLegacyEvent(event) {
+  if (event?.schemaVersion !== undefined) {
+    return clone(event);
+  }
+  const normalized = clone(event);
+  if (normalized.type === "ASSIGNMENT_ROUTED") {
+    normalized.data.assignment = normalizeLegacyAssignment(
+      normalized.data.assignment,
+    );
+    normalized.data.agent = normalizeLegacyAgent(normalized.data.agent);
+  }
+  if (normalized.type === "PLAN_ACCEPTED" && normalized.data.plan?.taskGraph) {
+    normalized.data.plan.taskGraph.assignments =
+      normalized.data.plan.taskGraph.assignments.map(normalizeLegacyAssignment);
+  }
+  if (
+    normalized.type === "EXECUTION_WAVE_DISPATCHED" &&
+    Array.isArray(normalized.data.routings)
+  ) {
+    normalized.data.routings = normalized.data.routings.map((routing) => ({
+      ...routing,
+      assignment: normalizeLegacyAssignment(routing.assignment),
+      agent: normalizeLegacyAgent(routing.agent),
+    }));
+  }
+  return normalized;
+}
+
+function normalizeEventHistory(events) {
+  return events.map(normalizeLegacyEvent);
 }
 
 function deepFreeze(value) {
@@ -362,6 +520,14 @@ function assertEventEnvelope(
 ) {
   if (!event || typeof event !== "object") {
     throw new Error(`Cannot replay event ${expectedSequence}: event is missing.`);
+  }
+  if (
+    event.schemaVersion !== undefined &&
+    event.schemaVersion !== EVENT_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: event schema version is unsupported.`,
+    );
   }
   if (event.sequence !== expectedSequence) {
     throw new Error(
@@ -624,7 +790,55 @@ function invalidateCorrectionCandidate(
   );
 }
 
+function assertAssignmentWithinMissionAuthority(mission, routing) {
+  if (routing.agent.effectivePermission !== "workspace-write") {
+    return;
+  }
+  const authority = mission.brief.mutationAuthority;
+  const prefix = "workspace-write:";
+  if (
+    typeof authority !== "string" ||
+    !authority.toLowerCase().startsWith(prefix)
+  ) {
+    throw new Error(
+      "Assignment workspace-write permission exceeds Mission mutation authority.",
+    );
+  }
+  let authorizedRoots;
+  try {
+    authorizedRoots = authority
+      .slice(prefix.length)
+      .split(",")
+      .map((path) => canonicalOwnershipPath(path.trim()));
+  } catch {
+    throw new Error(
+      "Mission mutation authority must declare canonical bounded relative roots.",
+    );
+  }
+  const writePaths = routing.assignment.ownershipBoundary.writePaths.map(
+    canonicalOwnershipPath,
+  );
+  if (
+    authorizedRoots.length === 0 ||
+    writePaths.some(
+      (path) =>
+        !authorizedRoots.some(
+          (root) => path === root || path.startsWith(`${root}/`),
+        ),
+    )
+  ) {
+    throw new Error(
+      "Assignment writable ownership exceeds Mission mutation authority.",
+    );
+  }
+}
+
 function projectAgentEvent(mission, event) {
+  if (mission.execution) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: legacy agent events are unavailable for a Task Graph Mission.`,
+    );
+  }
   if (event.type === "ASSIGNMENT_ROUTED") {
     if (mission.status !== "PLANNED" || mission.assignment) {
       throw new Error(
@@ -654,6 +868,17 @@ function projectAgentEvent(mission, event) {
         `Cannot replay event ${event.sequence}: Assignment and agent effective permission do not match.`,
       );
     }
+    const expectedRouting = routeAgentAssignment(event.data.assignment);
+    if (
+      JSON.stringify(expectedRouting.assignment) !==
+        JSON.stringify(event.data.assignment) ||
+      JSON.stringify(expectedRouting.agent) !== JSON.stringify(event.data.agent)
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: routed Assignment does not match the canonical routing policy.`,
+      );
+    }
+    assertAssignmentWithinMissionAuthority(mission, expectedRouting);
     mission.assignment = clone(event.data.assignment);
     mission.agent = clone(event.data.agent);
     mission.allowedActions = allowedActionsForMission(mission);
@@ -668,7 +893,16 @@ function projectAgentEvent(mission, event) {
   assertReplayObject(event.data.run, event, "run");
 
   if (event.type === "AGENT_RUN_STARTED") {
-    if (mission.status !== "PLANNED" || mission.run) {
+    const startsDispatchedCorrection =
+      mission.status === "RUNNING" &&
+      mission.correctionActive === true &&
+      mission.run?.status === "ASSIGNED";
+    if (
+      !(
+        (mission.status === "PLANNED" && !mission.run) ||
+        startsDispatchedCorrection
+      )
+    ) {
       throw new Error(
         `Cannot replay event ${event.sequence}: AGENT_RUN_STARTED is not allowed while Mission is ${mission.status}.`,
       );
@@ -680,7 +914,12 @@ function projectAgentEvent(mission, event) {
       );
     }
     mission.status = "RUNNING";
-    mission.run = clone(event.data.run);
+    mission.run = {
+      ...clone(event.data.run),
+      ...(startsDispatchedCorrection
+        ? { agentRole: mission.agent.roleId }
+        : {}),
+    };
     mission.allowedActions = allowedActionsForMission(mission);
     return;
   }
@@ -808,6 +1047,178 @@ function projectAgentEvent(mission, event) {
 
 }
 
+function syncMissionExecutionOutputs(mission) {
+  const completedNodes = mission.execution.nodes.filter(
+    (node) => node.status === "COMPLETED",
+  );
+  const candidateNodes = completedNodes.filter(
+    (node) => node.assignment.workKind !== "review",
+  );
+  const reviewNodes = completedNodes.filter(
+    (node) => node.assignment.workKind === "review",
+  );
+  mission.artifacts = candidateNodes.flatMap((node) => clone(node.artifacts));
+  mission.artifact = mission.artifacts[0] ? clone(mission.artifacts[0]) : null;
+  mission.artifactEvidenceRefs = appendUniqueStrings(
+    ...candidateNodes.map((node) => node.evidenceRefs),
+  );
+  mission.executionReviewEvidenceRefs = appendUniqueStrings(
+    ...reviewNodes.map((node) => node.evidenceRefs),
+  );
+  mission.executionReviewOutcome = reviewNodes[0]?.reviewOutcome
+    ? clone(reviewNodes[0].reviewOutcome)
+    : null;
+  return completedNodes;
+}
+
+function assertCurrentIndependentReviewerEvidence(mission, event) {
+  const reviewer = mission.execution?.nodes.find(
+    (node) =>
+      node.status === "COMPLETED" &&
+      node.agent?.roleId === "sol_reviewer" &&
+      node.agent?.effectivePermission === "read-only" &&
+      node.agent?.independent === true &&
+      node.reviewOutcome?.outcome === "PASSED" &&
+      event.data.review.reviewerAssignmentId === node.assignment.id &&
+      event.data.review.outcome === node.reviewOutcome.outcome &&
+      sameValue(
+        event.data.review.candidateArtifactRefs,
+        node.reviewOutcome.candidateArtifactRefs,
+      ) &&
+      sameValue(event.data.review.findings, node.reviewOutcome.findings) &&
+      event.actor === "agent:sol_reviewer" &&
+      event.evidenceRefs.length === node.evidenceRefs.length &&
+      event.evidenceRefs.every(
+        (reference, index) => reference === node.evidenceRefs[index],
+      ),
+  );
+  if (!reviewer) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: review outcome requires a current passing structured reviewer outcome, independent Sol Reviewer Evidence, and actor.`,
+    );
+  }
+}
+
+function projectExecutionEvent(mission, event) {
+  if (event.type === "EXECUTION_TRANSPORT_SETTLED") {
+    const { assignmentId, waveId, attempt } = event.data ?? {};
+    if (
+      event.actor !== "agent-router" ||
+      typeof assignmentId !== "string" ||
+      assignmentId.trim() === "" ||
+      typeof waveId !== "string" ||
+      waveId.trim() === "" ||
+      !Number.isInteger(attempt) ||
+      attempt < 1
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: execution transport settlement is invalid.`,
+      );
+    }
+    const dispatch = mission.events.find(
+      (candidate) =>
+        candidate.sequence < event.sequence &&
+        candidate.type === "EXECUTION_WAVE_DISPATCHED" &&
+        candidate.data?.transportReservationsTracked === true &&
+        candidate.data?.wave?.id === waveId &&
+        candidate.data.wave.assignmentIds?.includes(assignmentId),
+    );
+    const duplicate = mission.events.some(
+      (candidate) =>
+        candidate.sequence < event.sequence &&
+        candidate.type === "EXECUTION_TRANSPORT_SETTLED" &&
+        candidate.data?.waveId === waveId &&
+        candidate.data?.assignmentId === assignmentId,
+    );
+    if (!dispatch || duplicate) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: execution transport settlement does not match one open reservation.`,
+      );
+    }
+    return;
+  }
+  if (!mission.execution) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires a Task Graph.`,
+    );
+  }
+  const isDecisionEvent = [
+    "DECISION_ROOM_OPENED",
+    "DECISION_ROOM_RESOLVED",
+  ].includes(event.type);
+  if (
+    event.type === "EXECUTION_WAVE_DISPATCHED" &&
+    Array.isArray(event.data.routings)
+  ) {
+    for (const routing of event.data.routings) {
+      assertAssignmentWithinMissionAuthority(mission, routing);
+    }
+  }
+  if (event.type === "EXECUTION_WAVE_DISPATCHED" || isDecisionEvent) {
+    if (
+      !["PLANNED", "RUNNING", "CHANGES_REQUESTED"].includes(mission.status)
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: ${event.type} is not allowed while Mission is ${mission.status}.`,
+      );
+    }
+  } else if (mission.status !== "RUNNING") {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires a running Mission.`,
+    );
+  }
+
+  if (
+    event.evidenceRefs.some((reference) =>
+      (mission.invalidatedEvidenceRefs ?? []).includes(reference),
+    )
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} requires current Evidence.`,
+    );
+  }
+
+  if (event.type === "EXECUTION_RUN_COMPLETED") {
+    const artifactRefs = event.data.artifacts?.map(artifactReference) ?? [];
+    if (
+      event.evidenceRefs.some((reference) =>
+        (mission.invalidatedEvidenceRefs ?? []).includes(reference),
+      ) ||
+      artifactRefs.some(
+        (reference) =>
+          !reference ||
+          (mission.invalidatedArtifactRefs ?? []).includes(reference),
+      )
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: corrected execution Run requires regenerated Artifact and Evidence references.`,
+      );
+    }
+  }
+
+  try {
+    mission.execution = projectTaskExecutionEvent(mission.execution, event);
+  } catch (error) {
+    throw new Error(`Cannot replay event ${event.sequence}: ${error.message}`);
+  }
+
+  if (isDecisionEvent) {
+    mission.allowedActions = allowedActionsForMission(mission);
+    return;
+  }
+
+  const completedNodes = syncMissionExecutionOutputs(mission);
+  if (
+    completedNodes.length > 0 &&
+    completedNodes.length === mission.execution.nodes.length
+  ) {
+    mission.status = "IN_REVIEW";
+  } else {
+    mission.status = "RUNNING";
+  }
+  mission.allowedActions = allowedActionsForMission(mission);
+}
+
 function projectCorrectionEvent(mission, event) {
   if (event.type === "RELEASE_REJECTED") {
     if (mission.status !== "APPROVAL_REQUIRED") {
@@ -851,6 +1262,68 @@ function projectCorrectionEvent(mission, event) {
       throw new Error(
         `Cannot replay event ${event.sequence}: REVIEW_REJECTED requires Evidence.`,
       );
+    }
+    if (mission.execution) {
+      assertReplayString(event.data.review.summary, event, "review summary");
+      const reviewerNode = mission.execution.nodes.find(
+        (node) =>
+          node.assignment.id === event.data.review.reviewerAssignmentId,
+      );
+      if (
+        !reviewerNode ||
+        event.actor !== `agent:${reviewerNode.agent?.roleId}` ||
+        event.evidenceRefs.length !== reviewerNode.evidenceRefs.length ||
+        event.evidenceRefs.some(
+          (reference, index) =>
+            reference !== reviewerNode.evidenceRefs[index],
+        )
+      ) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: REVIEW_REJECTED requires current independent reviewer Evidence and actor.`,
+        );
+      }
+      let correction;
+      try {
+        correction = applyTaskReviewFindings(
+          mission.execution,
+          event.data.review,
+        );
+      } catch (error) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: ${error.message}`,
+        );
+      }
+      mission.execution = correction.execution;
+      mission.invalidatedArtifactRefs = appendUniqueStrings(
+        mission.invalidatedArtifactRefs ?? [],
+        correction.invalidatedArtifactRefs,
+      );
+      mission.invalidatedEvidenceRefs = appendUniqueStrings(
+        mission.invalidatedEvidenceRefs ?? [],
+        correction.invalidatedEvidenceRefs,
+        event.evidenceRefs,
+      );
+      mission.status = "CHANGES_REQUESTED";
+      mission.review = {
+        ...clone(event.data.review),
+        outcome: "FAILED",
+      };
+      mission.reviewEvidenceRefs = clone(event.evidenceRefs);
+      mission.validation = null;
+      mission.validationEvidenceRefs = null;
+      mission.releaseReadiness = null;
+      mission.approval = null;
+      mission.approvalEvidenceRefs = null;
+      syncMissionExecutionOutputs(mission);
+      mission.changeRequest = {
+        source: "REVIEW",
+        reason: event.reason,
+        evidenceRefs: clone(event.evidenceRefs),
+        affectedAssignmentIds: clone(correction.affectedAssignmentIds),
+        requestedAtSequence: event.sequence,
+      };
+      mission.allowedActions = allowedActionsForMission(mission);
+      return;
     }
     invalidateCorrectionCandidate(mission, event);
     mission.status = "CHANGES_REQUESTED";
@@ -903,7 +1376,11 @@ function projectCorrectionEvent(mission, event) {
     return;
   }
 
-  if (event.type === "CORRECTION_STARTED") {
+  if (
+    ["CORRECTION_DISPATCHED", "CORRECTION_STARTED"].includes(
+      event.type,
+    )
+  ) {
     const restartsInterruptedRun =
       mission.status === "RUNNING" &&
       Boolean(mission.assignment) &&
@@ -915,7 +1392,7 @@ function projectCorrectionEvent(mission, event) {
       )
     ) {
       throw new Error(
-        `Cannot replay event ${event.sequence}: CORRECTION_STARTED is not allowed while Mission is ${mission.status}.`,
+        `Cannot replay event ${event.sequence}: ${event.type} is not allowed while Mission is ${mission.status}.`,
       );
     }
     assertReplayObject(event.data.run, event, "run");
@@ -924,7 +1401,15 @@ function projectCorrectionEvent(mission, event) {
       event.data.run.agentRole !== mission.agent.roleId
     ) {
       throw new Error(
-        `Cannot replay event ${event.sequence}: CORRECTION_STARTED must return work to assigned role ${mission.agent.roleId}.`,
+        `Cannot replay event ${event.sequence}: ${event.type} must return work to assigned role ${mission.agent.roleId}.`,
+      );
+    }
+    if (
+      event.type === "CORRECTION_DISPATCHED" &&
+      event.data.run.status !== "ASSIGNED"
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: CORRECTION_DISPATCHED must reserve an assigned Run.`,
       );
     }
     mission.status = "RUNNING";
@@ -969,6 +1454,8 @@ function projectCorrectionEvent(mission, event) {
     mission.contextPackVersion = event.contextPackVersion;
     mission.context = clone(event.data.context);
     mission.plan = null;
+    mission.execution = null;
+    mission.executionReviewEvidenceRefs = null;
     mission.assignment = null;
     mission.agent = null;
     mission.run = null;
@@ -1011,6 +1498,14 @@ function projectCorrectionEvent(mission, event) {
     );
     mission.blockedFrom = mission.status;
     mission.blockedAllowedActions = clone(mission.allowedActions);
+    if (mission.status === "RUNNING" && mission.execution) {
+      mission.execution = interruptTaskExecution(mission.execution, {
+        status: "INTERRUPTED",
+        occurredAt: event.occurredAt,
+        reason: event.reason,
+      });
+      syncMissionExecutionOutputs(mission);
+    }
     if (
       mission.status === "RUNNING" &&
       mission.assignment &&
@@ -1050,6 +1545,10 @@ function projectCorrectionEvent(mission, event) {
       "resumption summary",
     );
     const safeStatus = mission.blockedFrom;
+    if (mission.execution) {
+      mission.execution = resumeInterruptedTaskExecution(mission.execution);
+      syncMissionExecutionOutputs(mission);
+    }
     mission.status = safeStatus;
     mission.lastBlock = clone(mission.block);
     mission.block = null;
@@ -1079,6 +1578,14 @@ function projectCorrectionEvent(mission, event) {
       "cancellation summary",
     );
     const cancelledFrom = mission.status;
+    if (mission.execution) {
+      mission.execution = interruptTaskExecution(mission.execution, {
+        status: "CANCELLED",
+        occurredAt: event.occurredAt,
+        reason: event.reason,
+      });
+      syncMissionExecutionOutputs(mission);
+    }
     mission.status = "CANCELLED";
     mission.cancelledFrom = cancelledFrom;
     mission.cancellation = {
@@ -1113,6 +1620,8 @@ function projectMission(events, expectedMissionId) {
     brief: clone(created.data.brief),
     context: null,
     plan: null,
+    execution: null,
+    executionReviewEvidenceRefs: null,
     run: null,
     artifact: null,
     review: null,
@@ -1139,6 +1648,15 @@ function projectMission(events, expectedMissionId) {
         );
       }
       projectAgentEvent(mission, event);
+      continue;
+    }
+    if (EXECUTION_EVENT_TYPES.has(event.type)) {
+      if (event.contextPackVersion !== mission.contextPackVersion) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: Context Pack version does not match.`,
+        );
+      }
+      projectExecutionEvent(mission, event);
       continue;
     }
     if (CORRECTION_EVENT_TYPES.has(event.type)) {
@@ -1177,6 +1695,9 @@ function projectMission(events, expectedMissionId) {
     }
     if (event.type === "REVIEW_PASSED") {
       assertPassingGatePayload(event.data.review, event, "review");
+      if (mission.execution) {
+        assertCurrentIndependentReviewerEvidence(mission, event);
+      }
       assertDistinctReleaseGateEvidence(mission, event);
     }
     if (event.type === "VALIDATION_PASSED") {
@@ -1242,6 +1763,27 @@ function projectMission(events, expectedMissionId) {
         ? "APPROVAL_REQUIRED"
         : projection.to;
     mission[projection.field] = clone(event.data[projection.field]);
+    if (event.type === "PLAN_ACCEPTED") {
+      mission.execution = null;
+      mission.executionReviewEvidenceRefs = null;
+      if (event.data.plan.taskGraph) {
+        try {
+          mission.execution = createTaskExecution(event.data.plan.taskGraph, {
+            requireIndependentReview: true,
+          });
+          for (const node of mission.execution.nodes) {
+            assertAssignmentWithinMissionAuthority(
+              mission,
+              routeAgentAssignment(node.assignment),
+            );
+          }
+        } catch (error) {
+          throw new Error(
+            `Cannot replay event ${event.sequence}: ${error.message}`,
+          );
+        }
+      }
+    }
     if (
       event.type === "VALIDATION_PASSED" &&
       mission.brief.releaseRequired
@@ -1279,6 +1821,17 @@ export function createMemoryEventStore(seed = {}) {
       clone(events),
     ]),
   );
+  const listeners = new Set();
+
+  const notify = (change) => {
+    for (const listener of listeners) {
+      try {
+        listener(change);
+      } catch {
+        // A projection/render listener cannot roll back an appended event.
+      }
+    }
+  };
 
   return {
     append(missionId, events, { expectedSequence } = {}) {
@@ -1292,6 +1845,7 @@ export function createMemoryEventStore(seed = {}) {
         );
       }
       eventsByMission.set(missionId, [...existing, ...clone(events)]);
+      notify({ missionId, events: clone(events), source: "local" });
     },
     load(missionId) {
       return clone(eventsByMission.get(missionId) ?? []);
@@ -1299,16 +1853,66 @@ export function createMemoryEventStore(seed = {}) {
     listMissionIds() {
       return [...eventsByMission.keys()];
     },
+    subscribe(listener) {
+      if (typeof listener !== "function") {
+        throw new Error("Event-store subscriber must be a function.");
+      }
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
   };
 }
 
 export function createLocalStorageEventStore({
   storage = globalThis.localStorage,
   key = "codex-mission-control-events-v1",
+  eventTarget = globalThis,
 } = {}) {
   if (!storage) {
     throw new Error("A local storage implementation is required.");
   }
+  const listeners = new Set();
+  const notify = (change) => {
+    for (const listener of listeners) {
+      try {
+        listener(change);
+      } catch {
+        // A projection/render listener cannot roll back an appended event.
+      }
+    }
+  };
+  const parseStorageValue = (serialized) => {
+    if (!serialized) return {};
+    try {
+      const parsed = JSON.parse(serialized);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const handleStorage = (event) => {
+    if (event?.key === key && event.storageArea === storage) {
+      const previous = parseStorageValue(event.oldValue);
+      const current = parseStorageValue(
+        event.newValue ?? storage.getItem(key),
+      );
+      if (!previous || !current) {
+        notify({ missionId: null, events: [], source: "storage" });
+        return;
+      }
+      const missionIds = new Set([
+        ...Object.keys(previous),
+        ...Object.keys(current),
+      ]);
+      for (const missionId of missionIds) {
+        if (!sameValue(previous[missionId], current[missionId])) {
+          notify({ missionId, events: [], source: "storage" });
+        }
+      }
+    }
+  };
 
   function readAll() {
     const serialized = storage.getItem(key);
@@ -1337,12 +1941,32 @@ export function createLocalStorageEventStore({
       }
       allEvents[missionId] = [...existing, ...clone(events)];
       storage.setItem(key, JSON.stringify(allEvents));
+      notify({ missionId, events: clone(events), source: "local" });
     },
     load(missionId) {
       return clone(readAll()[missionId] ?? []);
     },
     listMissionIds() {
       return Object.keys(readAll());
+    },
+    subscribe(listener) {
+      if (typeof listener !== "function") {
+        throw new Error("Event-store subscriber must be a function.");
+      }
+      const shouldConnect = listeners.size === 0;
+      listeners.add(listener);
+      if (shouldConnect && typeof eventTarget?.addEventListener === "function") {
+        eventTarget.addEventListener("storage", handleStorage);
+      }
+      return () => {
+        listeners.delete(listener);
+        if (
+          listeners.size === 0 &&
+          typeof eventTarget?.removeEventListener === "function"
+        ) {
+          eventTarget.removeEventListener("storage", handleStorage);
+        }
+      };
     },
   };
 }
@@ -1384,9 +2008,58 @@ export function createMissionOrchestrator({
   ) {
     throw new Error("The agent router must expose route() and run().");
   }
+  const activeExecutionRunControllers = new Map();
+
+  function executionRunKey(missionId, waveId, assignmentId, attempt) {
+    return `${missionId}:${waveId}:${assignmentId}:${attempt}`;
+  }
+
+  function abortMissionExecutionRuns(missionId, reason) {
+    for (const [key, controller] of activeExecutionRunControllers) {
+      if (key.startsWith(`${missionId}:`)) {
+        controller.abort(new Error(reason));
+      }
+    }
+  }
+
+  eventStore.subscribe?.((change) => {
+    if (!change?.missionId && change?.source === "storage") {
+      for (const controller of activeExecutionRunControllers.values()) {
+        controller.abort(
+          new Error("Mission history changed in another browser context"),
+        );
+      }
+      return;
+    }
+    if (
+      !change?.missionId ||
+      ![...activeExecutionRunControllers.keys()].some((key) =>
+        key.startsWith(`${change.missionId}:`),
+      )
+    ) {
+      return;
+    }
+    try {
+      const mission = getMission(change.missionId);
+      if (
+        ["BLOCKED", "CANCELLED", "CONTEXT_READY"].includes(mission.status) ||
+        !mission.execution
+      ) {
+        abortMissionExecutionRuns(
+          change.missionId,
+          `Mission entered ${mission.status}`,
+        );
+      }
+    } catch {
+      abortMissionExecutionRuns(
+        change.missionId,
+        "Mission history became unavailable",
+      );
+    }
+  });
 
   function getMission(missionId) {
-    const events = eventStore.load(missionId);
+    const events = normalizeEventHistory(eventStore.load(missionId));
     if (events.length === 0) {
       throw new Error(`Mission not found: ${missionId}.`);
     }
@@ -1409,6 +2082,7 @@ export function createMissionOrchestrator({
     assertAuditMetadata({ actor, reason });
     assertMission?.(mission);
     const event = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
       id: createId("event"),
       missionId,
       sequence: mission.events.length + 1,
@@ -1473,72 +2147,19 @@ export function createMissionOrchestrator({
     throw new Error(`Unsupported agent observation: ${observation.type}.`);
   }
 
-  function assertAssignmentWithinMissionAuthority(mission, routing) {
-    if (routing.agent.effectivePermission !== "workspace-write") {
-      return;
-    }
-    const authority = mission.brief.mutationAuthority;
-    const prefix = "workspace-write:";
-    if (
-      typeof authority !== "string" ||
-      !authority.toLowerCase().startsWith(prefix)
-    ) {
-      throw new Error(
-        "Assignment workspace-write permission exceeds Mission mutation authority.",
-      );
-    }
-    const authorizedRoots = authority
-      .slice(prefix.length)
-      .split(",")
-      .map((path) => path.trim().replaceAll("\\", "/").replace(/\/+$/, ""))
-      .filter(Boolean);
-    const writePaths = routing.assignment.ownershipBoundary.writePaths.map(
-      (path) => path.replaceAll("\\", "/").replace(/\/+$/, ""),
-    );
-    if (
-      authorizedRoots.length === 0 ||
-      writePaths.some(
-        (path) =>
-          !authorizedRoots.some(
-            (root) => path === root || path.startsWith(`${root}/`),
-          ),
-      )
-    ) {
-      throw new Error(
-        "Assignment writable ownership exceeds Mission mutation authority.",
-      );
-    }
-  }
-
-  async function consumeAgentRun(
-    missionId,
-    routing,
-    { correction = false } = {},
-  ) {
-    let awaitingCorrectionStart = correction;
+  async function consumeAgentRun(missionId, routing) {
     try {
       for await (const observation of agentRouter.run(routing)) {
         await writeCoordinator.runExclusive(() => {
           const mission = getMission(missionId);
-          const startsCorrection =
-            awaitingCorrectionStart && observation.type === "RUN_STARTED";
-          if (awaitingCorrectionStart && !startsCorrection) {
-            throw new Error(
-              "Correction transport must start a Run before reporting progress or an outcome.",
-            );
-          }
-          if (
-            !startsCorrection &&
-            !["PLANNED", "RUNNING"].includes(mission.status)
-          ) {
+          if (!["PLANNED", "RUNNING"].includes(mission.status)) {
             throw new Error(
               `Agent observation cannot be recorded while Mission is ${mission.status}.`,
             );
           }
           const run = runFromObservation(mission, observation);
-          const eventType = startsCorrection
-            ? "CORRECTION_STARTED"
-            : AGENT_EVENT_TYPE_BY_OBSERVATION[observation.type];
+          const eventType =
+            AGENT_EVENT_TYPE_BY_OBSERVATION[observation.type];
           if (!eventType) {
             throw new Error(
               `Unsupported agent observation: ${observation.type}.`,
@@ -1547,15 +2168,11 @@ export function createMissionOrchestrator({
           const eventReason =
             observation.summary ??
             observation.blocker ??
-            `${startsCorrection ? "Started correction for" : "Started Assignment"} ${routing.assignment.id}`;
+            `Started Assignment ${routing.assignment.id}`;
           const evidenceRefs =
             observation.type === "RUN_COMPLETED"
               ? observation.evidence.map((item) => item.ref)
               : [];
-          const eventRun = startsCorrection
-            ? { ...run, agentRole: routing.agent.roleId }
-            : run;
-
           const appended = appendAgentEvent(missionId, {
             type: eventType,
             actor: `agent:${routing.agent.roleId}`,
@@ -1563,13 +2180,12 @@ export function createMissionOrchestrator({
             occurredAt: observation.occurredAt,
             evidenceRefs,
             data: {
-              run: eventRun,
+              run,
               ...(observation.type === "RUN_COMPLETED"
                 ? { artifacts: observation.artifacts }
                 : {}),
             },
           });
-          awaitingCorrectionStart = false;
           return appended;
         });
         if (["RUN_COMPLETED", "RUN_BLOCKED"].includes(observation.type)) {
@@ -1629,6 +2245,350 @@ export function createMissionOrchestrator({
     return mission;
   }
 
+  async function consumeExecutionRunWithSignal(
+    missionId,
+    waveId,
+    attempt,
+    routing,
+    signal,
+  ) {
+    const missionAtDispatch = getMission(missionId);
+    const nodeAtDispatch = missionAtDispatch.execution?.nodes.find(
+      (node) => node.assignment.id === routing.assignment.id,
+    );
+    if (
+      missionAtDispatch.status !== "RUNNING" ||
+      !nodeAtDispatch ||
+      !["ASSIGNED", "WORKING"].includes(nodeAtDispatch.status) ||
+      nodeAtDispatch.currentWaveId !== waveId ||
+      nodeAtDispatch.attempt !== attempt
+    ) {
+      return missionAtDispatch;
+    }
+    const reviewContext =
+      routing.assignment.workKind === "review"
+        ? {
+            candidateArtifactRefs: (missionAtDispatch.artifacts ?? [])
+              .map(artifactReference)
+              .filter(Boolean),
+          }
+        : null;
+    const decisionRoom = missionAtDispatch.execution?.decisionRooms.find(
+      (room) =>
+        room.status === "RESOLVED" &&
+        room.assignmentId === routing.assignment.id &&
+        room.assignmentAttempt === attempt,
+    );
+    const decisionContext = decisionRoom
+      ? {
+          roomId: decisionRoom.id,
+          assignmentAttempt: decisionRoom.assignmentAttempt,
+          decisionArtifact: clone(decisionRoom.decisionArtifact),
+        }
+      : null;
+    try {
+      for await (const observation of agentRouter.run(routing, {
+        signal,
+        ...(reviewContext ? { reviewContext } : {}),
+        ...(decisionContext ? { decisionContext } : {}),
+      })) {
+        await writeCoordinator.runExclusive(() => {
+          const mission = getMission(missionId);
+          const node = mission.execution?.nodes.find(
+            (candidate) => candidate.assignment.id === routing.assignment.id,
+          );
+          if (!node || mission.status !== "RUNNING") {
+            throw new Error(
+              `Execution observation cannot be recorded for Assignment ${routing.assignment.id} while Mission is ${mission.status}.`,
+            );
+          }
+          const run = runFromObservation({ run: node.run }, observation);
+          const eventType =
+            EXECUTION_EVENT_TYPE_BY_OBSERVATION[observation.type];
+          if (!eventType) {
+            throw new Error(
+              `Unsupported execution observation: ${observation.type}.`,
+            );
+          }
+          const reason =
+            observation.summary ??
+            observation.blocker ??
+            `Started Assignment ${routing.assignment.id}`;
+          const evidenceRefs =
+            observation.type === "RUN_COMPLETED"
+              ? observation.evidence.map((item) => item.ref)
+              : [];
+          return appendAgentEvent(missionId, {
+            type: eventType,
+            actor: `agent:${routing.agent.roleId}`,
+            reason,
+            occurredAt: observation.occurredAt,
+            evidenceRefs,
+            data: {
+              assignmentId: routing.assignment.id,
+              waveId,
+              attempt,
+              run,
+              ...(observation.type === "RUN_COMPLETED"
+                ? { artifacts: observation.artifacts }
+                : {}),
+            },
+          });
+        });
+        if (["RUN_COMPLETED", "RUN_BLOCKED"].includes(observation.type)) {
+          break;
+        }
+      }
+    } catch (error) {
+      let interruptionHandled = false;
+      await writeCoordinator.runExclusive(() => {
+        const mission = getMission(missionId);
+        const node = mission.execution?.nodes.find(
+          (candidate) => candidate.assignment.id === routing.assignment.id,
+        );
+        if (
+          !mission.execution ||
+          !node ||
+          ["BLOCKED", "CANCELLED", "CONTEXT_READY"].includes(mission.status) ||
+          ["INTERRUPTED", "CANCELLED"].includes(node.status) ||
+          node.currentWaveId !== waveId ||
+          node.attempt !== attempt
+        ) {
+          interruptionHandled = true;
+          return mission;
+        }
+        if (
+          !["ASSIGNED", "WORKING"].includes(node.status)
+        ) {
+          throw error;
+        }
+        return appendAgentEvent(missionId, {
+          type: "EXECUTION_RUN_ERROR",
+          actor: "agent-router",
+          reason: error.message,
+          data: {
+            assignmentId: routing.assignment.id,
+            waveId,
+            attempt,
+            run: {
+              ...(node.run ? clone(node.run) : {}),
+              id: node.run?.id ?? `unavailable:${routing.assignment.id}`,
+              status: "ERROR",
+              updatedAt: clock(),
+              error: error.message,
+            },
+          },
+        });
+      });
+      if (interruptionHandled) {
+        return getMission(missionId);
+      }
+      throw error;
+    }
+
+    const mission = getMission(missionId);
+    const node = mission.execution?.nodes.find(
+      (candidate) => candidate.assignment.id === routing.assignment.id,
+    );
+    if (
+      !mission.execution ||
+      !node ||
+      ["BLOCKED", "CANCELLED", "CONTEXT_READY"].includes(mission.status) ||
+      ["INTERRUPTED", "CANCELLED"].includes(node.status) ||
+      node.currentWaveId !== waveId ||
+      node.attempt !== attempt
+    ) {
+      return mission;
+    }
+    if (!["COMPLETED", "BLOCKED"].includes(node.status)) {
+      const error = new Error(
+        `Agent transport ended without a terminal outcome for Assignment ${routing.assignment.id}.`,
+      );
+      await writeCoordinator.runExclusive(() =>
+        appendAgentEvent(missionId, {
+          type: "EXECUTION_RUN_ERROR",
+          actor: "agent-router",
+          reason: error.message,
+          data: {
+            assignmentId: routing.assignment.id,
+            waveId,
+            attempt,
+            run: {
+              ...(node.run ? clone(node.run) : {}),
+              id: node.run?.id ?? `unavailable:${routing.assignment.id}`,
+              status: "ERROR",
+              updatedAt: clock(),
+              error: error.message,
+            },
+          },
+        }),
+      );
+      throw error;
+    }
+    return mission;
+  }
+
+  async function consumeExecutionRun(missionId, waveId, attempt, routing) {
+    const key = executionRunKey(
+      missionId,
+      waveId,
+      routing.assignment.id,
+      attempt,
+    );
+    const controller = new AbortController();
+    activeExecutionRunControllers.set(key, controller);
+    try {
+      return await consumeExecutionRunWithSignal(
+        missionId,
+        waveId,
+        attempt,
+        routing,
+        controller.signal,
+      );
+    } finally {
+      try {
+        await writeCoordinator.runExclusive(() => {
+          const mission = getMission(missionId);
+          const alreadySettled = mission.events.some(
+            (event) =>
+              event.type === "EXECUTION_TRANSPORT_SETTLED" &&
+              event.data?.waveId === waveId &&
+              event.data?.assignmentId === routing.assignment.id,
+          );
+          if (alreadySettled) return mission;
+          return appendAgentEvent(missionId, {
+            type: "EXECUTION_TRANSPORT_SETTLED",
+            actor: "agent-router",
+            reason: `Transport settled for Assignment ${routing.assignment.id}`,
+            data: {
+              assignmentId: routing.assignment.id,
+              waveId,
+              attempt,
+            },
+          });
+        });
+      } finally {
+        activeExecutionRunControllers.delete(key);
+      }
+    }
+  }
+
+  function activeTrackedTransportReservations(missionId, mission) {
+    const reservations = new Map();
+    for (const event of mission.events) {
+      if (
+        event.type === "EXECUTION_WAVE_DISPATCHED" &&
+        event.data?.transportReservationsTracked === true
+      ) {
+        for (const routing of event.data.routings ?? []) {
+          reservations.set(
+            `${event.data.wave.id}:${routing.assignment.id}`,
+            {
+              missionId,
+              assignment: clone(routing.assignment),
+              coordinationRequired:
+                (event.data.wave.reservedSlots ?? 0) > 0,
+            },
+          );
+        }
+      }
+      if (event.type === "EXECUTION_TRANSPORT_SETTLED") {
+        reservations.delete(
+          `${event.data.waveId}:${event.data.assignmentId}`,
+        );
+      }
+    }
+    return [...reservations.values()];
+  }
+
+  function buildGlobalExecutionPlanningContext(missionId, mission) {
+    const missions = eventStore.listMissionIds().map((candidateId) => ({
+      id: candidateId,
+      mission: getMission(candidateId),
+    }));
+    const activeAssignments = [];
+    let coordinationRequired = false;
+
+    for (const candidate of missions) {
+      const trackedReservations = activeTrackedTransportReservations(
+        candidate.id,
+        candidate.mission,
+      );
+      const trackedAssignmentIds = new Set(
+        trackedReservations.map(
+          (reservation) => reservation.assignment.id,
+        ),
+      );
+      activeAssignments.push(...trackedReservations);
+      coordinationRequired ||=
+        trackedReservations.some(
+          (reservation) => reservation.coordinationRequired,
+        );
+      if (candidate.mission.execution) {
+        const executionIsCoordinating =
+          candidate.mission.execution.activeAssignmentIds.length > 0 ||
+          ["PLANNED", "RUNNING", "CHANGES_REQUESTED"].includes(
+            candidate.mission.status,
+          );
+        coordinationRequired ||=
+          executionIsCoordinating &&
+          candidate.mission.execution.coordinationRequired;
+        for (const node of candidate.mission.execution.nodes) {
+          if (
+            ["ASSIGNED", "WORKING"].includes(node.status) &&
+            !trackedAssignmentIds.has(node.assignment.id)
+          ) {
+            activeAssignments.push({
+              missionId: candidate.id,
+              assignment: clone(node.assignment),
+            });
+          }
+        }
+        continue;
+      }
+      if (
+        candidate.mission.assignment &&
+        (candidate.mission.status === "PLANNED" ||
+          ["ASSIGNED", "WORKING"].includes(
+            candidate.mission.run?.status,
+          ))
+      ) {
+        activeAssignments.push({
+          missionId: candidate.id,
+          assignment: clone(candidate.mission.assignment),
+        });
+      }
+    }
+
+    const globalReservedSlots = coordinationRequired ? 1 : 0;
+    const globalWorkerCapacity =
+      GLOBAL_AGENT_CAPACITY - globalReservedSlots;
+    const globalActiveWorkerCount = activeAssignments.length;
+    const globalAvailableWorkerSlots = Math.max(
+      0,
+      globalWorkerCapacity - globalActiveWorkerCount,
+    );
+    const locallyProjectedActiveIds = new Set(
+      mission.execution?.activeAssignmentIds ?? [],
+    );
+    const concurrentAssignments = activeAssignments
+      .filter(
+        (active) =>
+          active.missionId !== missionId ||
+          !locallyProjectedActiveIds.has(active.assignment.id),
+      )
+      .map((active) => active.assignment);
+
+    return {
+      globalCapacity: GLOBAL_AGENT_CAPACITY,
+      globalReservedSlots,
+      globalWorkerCapacity,
+      globalActiveWorkerCount,
+      globalAvailableWorkerSlots,
+      concurrentAssignments,
+    };
+  }
+
   return {
     createMission(input) {
       return writeCoordinator.runExclusive(() => {
@@ -1638,6 +2598,7 @@ export function createMissionOrchestrator({
 
         const missionId = createId("mission");
         const event = {
+          schemaVersion: EVENT_SCHEMA_VERSION,
           id: createId("event"),
           missionId,
           sequence: 1,
@@ -1657,11 +2618,93 @@ export function createMissionOrchestrator({
     listMissions() {
       return eventStore
         .listMissionIds()
-        .map((missionId) =>
-          projectMission(eventStore.load(missionId), missionId),
-        );
+        .map((missionId) => getMission(missionId));
     },
     getMission,
+    async dispatchExecutionWave(missionId, input) {
+      if (!agentRouter) {
+        throw new Error("Agent routing is not connected.");
+      }
+      const { actor, reason } = input;
+      assertAuditMetadata({ actor, reason });
+
+      const prepared = await writeCoordinator.runExclusive(() => {
+        const mission = getMission(missionId);
+        if (!mission.execution) {
+          throw new Error("Execution wave requires an accepted Task Graph.");
+        }
+        if (!mission.allowedActions.includes("dispatch_execution_wave")) {
+          throw new Error(
+            `Execution wave dispatch is not allowed while Mission is ${mission.status}.`,
+          );
+        }
+        const planningContext = buildGlobalExecutionPlanningContext(
+          missionId,
+          mission,
+        );
+        const wavePlan = planTaskExecutionWave(mission.execution, {
+          availableWorkerSlots:
+            planningContext.globalAvailableWorkerSlots,
+          concurrentAssignments: planningContext.concurrentAssignments,
+        });
+        if (wavePlan.assignmentIds.length === 0) {
+          if (planningContext.globalAvailableWorkerSlots === 0) {
+            throw new Error(
+              "No global worker slot is available for this execution wave.",
+            );
+          }
+          throw new Error("No safe Assignment is available for this wave.");
+        }
+        const routings = wavePlan.assignmentIds.map((assignmentId) => {
+          const node = mission.execution.nodes.find(
+            (candidate) => candidate.assignment.id === assignmentId,
+          );
+          const routing = agentRouter.route(node.assignment);
+          assertAssignmentWithinMissionAuthority(mission, routing);
+          return routing;
+        });
+        const wave = {
+          id: createId("wave"),
+          ...wavePlan,
+        };
+        const dispatched = appendAgentEvent(missionId, {
+          type: "EXECUTION_WAVE_DISPATCHED",
+          actor,
+          reason,
+          data: {
+            wave,
+            routings,
+            planningContext,
+            transportReservationsTracked: true,
+          },
+        });
+        const attempts = routings.map((routing) =>
+          dispatched.execution.nodes.find(
+            (node) => node.assignment.id === routing.assignment.id,
+          ).attempt,
+        );
+        return { wave, routings, attempts };
+      });
+
+      const results = await Promise.allSettled(
+        prepared.routings.map((routing, index) =>
+          consumeExecutionRun(
+            missionId,
+            prepared.wave.id,
+            prepared.attempts[index],
+            routing,
+          ),
+        ),
+      );
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((failure) => failure.reason),
+          `${failures.length} execution-wave Assignment(s) failed.`,
+        );
+      }
+      return getMission(missionId);
+    },
     async dispatchAssignment(missionId, input) {
       if (!agentRouter) {
         throw new Error("Agent routing is not connected.");
@@ -1680,6 +2723,11 @@ export function createMissionOrchestrator({
             agent: routing.agent,
           },
           assertMission(mission) {
+            if (mission.execution) {
+              throw new Error(
+                "A legacy Assignment dispatch is unavailable for a Task Graph Mission.",
+              );
+            }
             if (mission.status !== "PLANNED") {
               throw new Error(
                 `Assignment routing is not allowed while Mission is ${mission.status}.`,
@@ -1691,6 +2739,24 @@ export function createMissionOrchestrator({
               );
             }
             assertAssignmentWithinMissionAuthority(mission, routing);
+            const planningContext = buildGlobalExecutionPlanningContext(
+              missionId,
+              mission,
+            );
+            if (planningContext.globalAvailableWorkerSlots === 0) {
+              throw new Error(
+                "No global worker slot is available for this Assignment.",
+              );
+            }
+            if (
+              planningContext.concurrentAssignments.some((concurrent) =>
+                writableAssignmentsOverlap(routing.assignment, concurrent),
+              )
+            ) {
+              throw new Error(
+                "Legacy Assignment writable ownership overlaps active writable ownership.",
+              );
+            }
           },
         }),
       );
@@ -1703,33 +2769,74 @@ export function createMissionOrchestrator({
       }
       const { actor, reason } = input;
       assertAuditMetadata({ actor, reason });
-      const mission = getMission(missionId);
-      if (!mission.assignment || !mission.agent) {
-        throw new Error(
-          "A connected correction requires the existing assigned agent.",
+      const routing = await writeCoordinator.runExclusive(() => {
+        const mission = getMission(missionId);
+        if (mission.execution) {
+          throw new Error(
+            "A legacy correction dispatch is unavailable for a Task Graph Mission.",
+          );
+        }
+        if (!mission.assignment || !mission.agent) {
+          throw new Error(
+            "A connected correction requires the existing assigned agent.",
+          );
+        }
+        const interruptedAssignedRun =
+          mission.status === "RUNNING" &&
+          ["INTERRUPTED", "BLOCKED", "ERROR"].includes(
+            mission.run?.status,
+          );
+        if (
+          !(
+            mission.status === "CHANGES_REQUESTED" ||
+            interruptedAssignedRun
+          )
+        ) {
+          throw new Error(
+            `Correction dispatch is not allowed while Mission is ${mission.status}.`,
+          );
+        }
+        const nextRouting = agentRouter.route(mission.assignment);
+        if (nextRouting.agent.roleId !== mission.agent.roleId) {
+          throw new Error(
+            `Correction routing changed assigned role from ${mission.agent.roleId} to ${nextRouting.agent.roleId}.`,
+          );
+        }
+        assertAssignmentWithinMissionAuthority(mission, nextRouting);
+        const planningContext = buildGlobalExecutionPlanningContext(
+          missionId,
+          mission,
         );
-      }
-      const interruptedAssignedRun =
-        mission.status === "RUNNING" &&
-        ["INTERRUPTED", "BLOCKED", "ERROR"].includes(mission.run?.status);
-      if (
-        !(
-          mission.status === "CHANGES_REQUESTED" ||
-          interruptedAssignedRun
-        )
-      ) {
-        throw new Error(
-          `Correction dispatch is not allowed while Mission is ${mission.status}.`,
-        );
-      }
-      const routing = agentRouter.route(mission.assignment);
-      if (routing.agent.roleId !== mission.agent.roleId) {
-        throw new Error(
-          `Correction routing changed assigned role from ${mission.agent.roleId} to ${routing.agent.roleId}.`,
-        );
-      }
-      assertAssignmentWithinMissionAuthority(mission, routing);
-      return consumeAgentRun(missionId, routing, { correction: true });
+        if (planningContext.globalAvailableWorkerSlots === 0) {
+          throw new Error(
+            "No global worker slot is available for this correction.",
+          );
+        }
+        if (
+          planningContext.concurrentAssignments.some((concurrent) =>
+            writableAssignmentsOverlap(nextRouting.assignment, concurrent),
+          )
+        ) {
+          throw new Error(
+            "Legacy correction writable ownership overlaps active writable ownership.",
+          );
+        }
+        appendAgentEvent(missionId, {
+          type: "CORRECTION_DISPATCHED",
+          actor,
+          reason,
+          data: {
+            run: {
+              id: `reserved:${nextRouting.assignment.id}:${mission.events.length + 1}`,
+              status: "ASSIGNED",
+              updatedAt: clock(),
+              agentRole: nextRouting.agent.roleId,
+            },
+          },
+        });
+        return nextRouting;
+      });
+      return consumeAgentRun(missionId, routing);
     },
     execute(missionId, input) {
       return writeCoordinator.runExclusive(() => {
@@ -1741,12 +2848,21 @@ export function createMissionOrchestrator({
           evidenceRefs = [],
         } = input;
         const mission = getMission(missionId);
-        const command = COMMANDS[type] ?? CORRECTION_COMMANDS[type];
+        const command =
+          COMMANDS[type] ?? CORRECTION_COMMANDS[type] ?? EXECUTION_COMMANDS[type];
 
         if (!command) {
           throw new Error(`Unknown command: ${type}.`);
         }
         assertAuditMetadata({ actor, reason });
+        if (
+          mission.execution &&
+          ["START_RUN", "SUBMIT_ARTIFACT", "START_CORRECTION"].includes(type)
+        ) {
+          throw new Error(
+            "Legacy Run commands are unavailable for a Task Graph Mission.",
+          );
+        }
         const allowedFrom = Array.isArray(command.from)
           ? command.from
           : [command.from];
@@ -1861,6 +2977,7 @@ export function createMissionOrchestrator({
         }
 
         const event = {
+          schemaVersion: EVENT_SCHEMA_VERSION,
           id: createId("event"),
           missionId,
           sequence: mission.events.length + 1,
@@ -1879,7 +2996,11 @@ export function createMissionOrchestrator({
         eventStore.append(missionId, [event], {
           expectedSequence: mission.events.length,
         });
-        return getMission(missionId);
+        const updated = getMission(missionId);
+        if (["BLOCK_MISSION", "CANCEL_MISSION", "REVISE_CONTEXT"].includes(type)) {
+          abortMissionExecutionRuns(missionId, reason);
+        }
+        return updated;
       });
     },
   };

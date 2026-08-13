@@ -45,6 +45,7 @@ const ROLE_ROUTES = Object.freeze([
     workKinds: Object.freeze(["review"]),
     risks: Object.freeze(["low", "medium", "high", "critical"]),
     maximumPermission: "read-only",
+    independent: true,
   }),
 ]);
 
@@ -182,6 +183,47 @@ function normalizeTransportObservation(message) {
   throw new Error(`Unknown agent transport observation: ${message.kind}.`);
 }
 
+export function routeAgentAssignment(assignment) {
+  assertValidAgentAssignment(assignment);
+  const role = ROLE_ROUTES.find(
+    (candidate) =>
+      candidate.workKinds.includes(assignment.workKind) &&
+      candidate.risks.includes(assignment.risk),
+  );
+  if (!role) {
+    throw new Error(
+      `No configured role can accept ${assignment.workKind} work at ${assignment.risk} risk.`,
+    );
+  }
+
+  const effectivePermission =
+    role.maximumPermission === "read-only"
+      ? "read-only"
+      : assignment.effectivePermission;
+  const boundedAssignment = clone(assignment);
+  boundedAssignment.effectivePermission = effectivePermission;
+  if (effectivePermission === "read-only") {
+    boundedAssignment.ownershipBoundary.readPaths = [
+      ...new Set([
+        ...boundedAssignment.ownershipBoundary.readPaths,
+        ...boundedAssignment.ownershipBoundary.writePaths,
+      ]),
+    ];
+    boundedAssignment.ownershipBoundary.writePaths = [];
+  }
+
+  return deepFreeze({
+    assignment: boundedAssignment,
+    agent: {
+      roleId: role.roleId,
+      roleName: role.roleName,
+      capability: role.capability,
+      effectivePermission,
+      ...(role.independent ? { independent: true } : {}),
+    },
+  });
+}
+
 export function createAgentRoutingAdapter({ transport }) {
   if (!transport || typeof transport.run !== "function") {
     throw new Error("An agent transport with run() is required.");
@@ -189,45 +231,12 @@ export function createAgentRoutingAdapter({ transport }) {
 
   return {
     route(assignment) {
-      assertValidAgentAssignment(assignment);
-      const role = ROLE_ROUTES.find(
-        (candidate) =>
-          candidate.workKinds.includes(assignment.workKind) &&
-          candidate.risks.includes(assignment.risk),
-      );
-      if (!role) {
-        throw new Error(
-          `No configured role can accept ${assignment.workKind} work at ${assignment.risk} risk.`,
-        );
-      }
-
-      const effectivePermission =
-        role.maximumPermission === "read-only"
-          ? "read-only"
-          : assignment.effectivePermission;
-      const boundedAssignment = clone(assignment);
-      boundedAssignment.effectivePermission = effectivePermission;
-      if (effectivePermission === "read-only") {
-        boundedAssignment.ownershipBoundary.readPaths = [
-          ...new Set([
-            ...boundedAssignment.ownershipBoundary.readPaths,
-            ...boundedAssignment.ownershipBoundary.writePaths,
-          ]),
-        ];
-        boundedAssignment.ownershipBoundary.writePaths = [];
-      }
-
-      return deepFreeze({
-        assignment: boundedAssignment,
-        agent: {
-          roleId: role.roleId,
-          roleName: role.roleName,
-          capability: role.capability,
-          effectivePermission,
-        },
-      });
+      return routeAgentAssignment(assignment);
     },
-    async *run(routing) {
+    async *run(
+      routing,
+      { signal, reviewContext, decisionContext } = {},
+    ) {
       if (
         !routing ||
         typeof routing !== "object" ||
@@ -237,11 +246,23 @@ export function createAgentRoutingAdapter({ transport }) {
         throw new Error("A routed Assignment is required.");
       }
 
-      const stream = transport.run({
+      if (
+        signal !== undefined &&
+        (!signal || typeof signal.aborted !== "boolean")
+      ) {
+        throw new Error("Agent transport AbortSignal is invalid.");
+      }
+      const transportRequest = {
         roleId: routing.agent.roleId,
         permission: routing.agent.effectivePermission,
         assignment: clone(routing.assignment),
-      });
+        ...(signal ? { signal } : {}),
+        ...(reviewContext ? { reviewContext: clone(reviewContext) } : {}),
+        ...(decisionContext
+          ? { decisionContext: clone(decisionContext) }
+          : {}),
+      };
+      const stream = transport.run(transportRequest);
       if (!stream || typeof stream[Symbol.asyncIterator] !== "function") {
         throw new Error("Agent transport run() must return an async iterable.");
       }

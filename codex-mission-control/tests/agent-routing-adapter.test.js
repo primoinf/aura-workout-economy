@@ -210,3 +210,60 @@ test("adapter exposes normalized live Run observations without treating spawn as
     },
   ]);
 });
+
+test("routing covers every Ticket 05 role and makes independent review read-only", () => {
+  const adapter = createAgentRoutingAdapter({
+    transport: { run: async function* () {} },
+  });
+  const route = (workKind, risk, overrides = {}) =>
+    adapter.route({
+      ...boundedAssignment,
+      workKind,
+      risk,
+      ...overrides,
+    });
+
+  assert.deepEqual(
+    [
+      route("deterministic", "low").agent.roleId,
+      route("implementation", "medium").agent.roleId,
+      route("debugging", "high").agent.roleId,
+      route("architecture", "critical").agent.roleId,
+      route("review", "high").agent.roleId,
+    ],
+    [
+      "luna_worker",
+      "terra_builder",
+      "terra_debugger",
+      "sol_architect",
+      "sol_reviewer",
+    ],
+  );
+
+  const reviewer = route("review", "high", {
+    effectivePermission: "workspace-write",
+    ownershipBoundary: {
+      readPaths: ["src/mission-orchestrator.js"],
+      writePaths: ["src/task-graph-execution.js"],
+    },
+  });
+  assert.deepEqual(
+    {
+      roleId: reviewer.agent.roleId,
+      independent: reviewer.agent.independent,
+      effectivePermission: reviewer.agent.effectivePermission,
+      readPaths: reviewer.assignment.ownershipBoundary.readPaths,
+      writePaths: reviewer.assignment.ownershipBoundary.writePaths,
+    },
+    {
+      roleId: "sol_reviewer",
+      independent: true,
+      effectivePermission: "read-only",
+      readPaths: [
+        "src/mission-orchestrator.js",
+        "src/task-graph-execution.js",
+      ],
+      writePaths: [],
+    },
+  );
+});

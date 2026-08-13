@@ -1304,7 +1304,10 @@ h1 {
 .brief-panel,
 .action-card,
 .completion-card,
-.agent-lanes-panel {
+.agent-lanes-panel,
+.task-graph-panel,
+.decision-room-panel,
+.execution-activity-panel {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: linear-gradient(145deg, rgba(15, 31, 43, 0.96), rgba(7, 17, 25, 0.96));
@@ -1536,6 +1539,353 @@ h1 {
   color: var(--red);
 }
 
+.task-graph-panel,
+.decision-room-panel,
+.execution-activity-panel {
+  margin-top: 16px;
+  padding: 20px;
+}
+
+.execution-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.execution-summary-grid article {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(5, 15, 23, 0.58);
+}
+
+.execution-summary-grid span,
+.execution-summary-grid small,
+.decision-rationale-grid span,
+.decision-evidence > span {
+  display: block;
+  color: var(--muted-2);
+  font-family: var(--mono);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.execution-summary-grid strong {
+  display: block;
+  margin-top: 7px;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.execution-summary-grid small {
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  text-transform: none;
+}
+
+.task-node-grid,
+.execution-wave-list ol,
+.execution-reference-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-node-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.task-node {
+  height: 100%;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(7, 18, 27, 0.76);
+}
+
+.task-node.is-frontier {
+  border-color: rgba(39, 215, 255, 0.44);
+  box-shadow: inset 0 0 0 1px rgba(39, 215, 255, 0.08);
+}
+
+.task-node.state-completed {
+  border-color: rgba(56, 230, 160, 0.3);
+}
+
+.task-node.state-working,
+.task-node.state-assigned {
+  border-color: rgba(39, 215, 255, 0.36);
+}
+
+.task-node.state-decision-required,
+.task-node.state-changes-requested,
+.task-node.state-blocked {
+  border-color: rgba(255, 194, 92, 0.42);
+}
+
+.task-node-heading,
+.decision-room-heading,
+.execution-wave > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-node-id,
+.task-node-status {
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 8px;
+  overflow-wrap: anywhere;
+  text-transform: uppercase;
+}
+
+.task-node-status {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.task-node h3,
+.decision-room-card h3 {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.task-node > p,
+.decision-participants,
+.execution-wave p,
+.execution-wave small,
+.decision-alternative li,
+.decision-rationale-grid p,
+.decision-rationale-grid li,
+.decision-outcome {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.task-node dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+.task-node dl div {
+  min-width: 0;
+}
+
+.task-node dt {
+  color: var(--muted-2);
+  font-family: var(--mono);
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.task-node dd {
+  margin: 4px 0 0;
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.task-node > small {
+  display: block;
+  margin-top: 12px;
+  color: var(--violet);
+  font-family: var(--mono);
+  font-size: 7px;
+  overflow-wrap: anywhere;
+}
+
+.execution-wave-list {
+  margin-top: 18px;
+}
+
+.execution-wave-list h3 {
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.execution-wave-list ol {
+  display: grid;
+  gap: 8px;
+}
+
+.execution-wave {
+  padding: 12px 14px;
+  border-left: 2px solid var(--cyan);
+  background: rgba(5, 15, 23, 0.62);
+}
+
+.execution-wave strong,
+.execution-wave span {
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.execution-wave span {
+  color: var(--cyan);
+}
+
+.execution-wave p,
+.execution-wave small {
+  display: block;
+  margin: 6px 0 0;
+}
+
+.decision-room-list {
+  display: grid;
+  gap: 12px;
+}
+
+.decision-room-card {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(7, 18, 27, 0.76);
+}
+
+.decision-room-card.state-open {
+  border-color: rgba(255, 194, 92, 0.42);
+}
+
+.decision-room-card.state-resolved {
+  border-color: rgba(56, 230, 160, 0.32);
+}
+
+.decision-room-card.state-stale {
+  border-color: rgba(255, 113, 141, 0.38);
+  background: rgba(47, 18, 29, 0.34);
+}
+
+.decision-participants {
+  margin: 8px 0 0;
+  font-family: var(--mono);
+}
+
+.decision-participant-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.decision-participant-inputs section,
+.decision-expected-output {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(5, 15, 23, 0.52);
+}
+
+.decision-participant-inputs p,
+.decision-expected-output {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.decision-expected-output strong {
+  margin-right: 6px;
+  color: var(--violet);
+}
+
+.decision-alternatives,
+.decision-rationale-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.decision-alternative,
+.decision-rationale-grid section {
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(5, 15, 23, 0.52);
+}
+
+.decision-alternative.is-selected {
+  border-color: rgba(139, 120, 255, 0.52);
+  background: var(--violet-soft);
+}
+
+.decision-alternative h4,
+.decision-alternative strong,
+.decision-rationale-grid strong {
+  font-size: 10px;
+}
+
+.decision-alternative strong,
+.decision-rationale-grid strong {
+  display: block;
+  margin-top: 10px;
+  color: var(--violet);
+}
+
+.decision-alternative ul,
+.decision-rationale-grid ul {
+  margin: 7px 0 0;
+  padding-left: 16px;
+}
+
+.decision-evidence {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.execution-reference-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.execution-reference-list li {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--violet);
+  font-family: var(--mono);
+  font-size: 7px;
+  overflow-wrap: anywhere;
+}
+
+.decision-outcome {
+  margin: 14px 0 0;
+  padding: 10px;
+  border-left: 2px solid var(--green);
+  background: var(--green-soft);
+}
+
+.execution-empty {
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+.execution-activity {
+  margin-top: 4px;
+}
+
+.execution-activity .event-copy > small {
+  display: block;
+  margin-top: 6px;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 330px;
@@ -1555,6 +1905,57 @@ h1 {
   gap: 28px;
   min-height: 145px;
   padding: 24px;
+}
+
+.decision-action-card {
+  display: grid;
+  align-items: stretch;
+  gap: 20px;
+}
+
+.decision-form-grid {
+  width: 100%;
+}
+
+.decision-form-assignment {
+  color: var(--violet);
+  font-family: var(--mono);
+}
+
+.decision-choice-fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.decision-choice-fieldset legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.decision-choice-fieldset label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.decision-choice-fieldset label span,
+.decision-choice-fieldset label small {
+  display: block;
+}
+
+.decision-choice-fieldset label small {
+  margin-top: 4px;
+  color: var(--muted);
 }
 
 .action-card p:last-child,
@@ -2437,6 +2838,10 @@ h1 {
     grid-template-columns: 1fr;
   }
 
+  .execution-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .approval-ledger-grid {
     grid-template-columns: 1fr;
   }
@@ -2542,7 +2947,21 @@ h1 {
   .metric-grid,
   .mission-grid,
   .team-grid,
-  .mission-inventory .mission-grid {
+  .mission-inventory .mission-grid,
+  .execution-summary-grid,
+  .task-node-grid,
+  .decision-alternatives,
+  .decision-rationale-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-graph-panel,
+  .decision-room-panel,
+  .execution-activity-panel {
+    padding: 16px;
+  }
+
+  .task-node dl {
     grid-template-columns: 1fr;
   }
 

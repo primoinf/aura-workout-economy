@@ -14,6 +14,27 @@ function assertNonEmptyStringArray(value, field) {
   }
 }
 
+export function canonicalOwnershipPath(path) {
+  if (typeof path !== "string" || path.trim() === "") {
+    throw new Error("Ownership path is required.");
+  }
+  const segments = path.split("/");
+  if (
+    path !== path.trim() ||
+    path.includes("\\") ||
+    path.startsWith("/") ||
+    /^[a-z]:\//i.test(path) ||
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    throw new Error(
+      "Ownership path must use bounded relative paths (canonical bounded relative paths only).",
+    );
+  }
+  return path.toLowerCase();
+}
+
 function assertPathArray(value, field) {
   if (
     !Array.isArray(value) ||
@@ -21,19 +42,11 @@ function assertPathArray(value, field) {
   ) {
     throw new Error(`Assignment ownershipBoundary ${field} is invalid.`);
   }
-  if (
-    value.some((path) => {
-      const normalized = path.trim().replaceAll("\\", "/");
-      return (
-        normalized === "." ||
-        normalized.startsWith("/") ||
-        /^[a-z]:\//i.test(normalized) ||
-        normalized.split("/").includes("..")
-      );
-    })
-  ) {
+  try {
+    value.forEach(canonicalOwnershipPath);
+  } catch {
     throw new Error(
-      `Assignment ownershipBoundary ${field} must use bounded relative paths.`,
+      `Assignment ownershipBoundary ${field} must use bounded relative paths (canonical bounded relative paths only).`,
     );
   }
 }

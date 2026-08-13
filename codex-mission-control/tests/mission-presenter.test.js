@@ -137,6 +137,135 @@ test("Command Deck derives honest metrics and configured team state from Mission
   );
 });
 
+test("same-role Runs stay distinct and only routed waiting work receives a queue position", () => {
+  const node = (id, sequence, status = "WORKING") => ({
+    assignment: {
+      id,
+      goal: `Build ${id}`,
+      effectivePermission: "workspace-write",
+    },
+    dependsOn: [],
+    requiresDecision: false,
+    status,
+    attempt: 1,
+    currentWaveId: "wave-concurrent",
+    agent: {
+      roleId: "terra_builder",
+      roleName: "Terra Builder",
+      capability: "implementation",
+      effectivePermission: "workspace-write",
+    },
+    run:
+      status === "ASSIGNED"
+        ? null
+        : {
+            id: `run:${id}`,
+            status: "WORKING",
+            startedAt: `2026-08-08T09:0${sequence}:00.000Z`,
+            updatedAt: `2026-08-08T09:0${sequence}:00.000Z`,
+            evidence: [],
+          },
+    artifacts: [],
+    evidenceRefs: [],
+  });
+  const mission = {
+    id: "mission-concurrent-builders",
+    brief,
+    status: "RUNNING",
+    contextPackVersion: 1,
+    allowedActions: ["block_mission", "cancel_mission"],
+    execution: {
+      capacity: 4,
+      reservedSlots: 1,
+      workerCapacity: 3,
+      availableWorkerSlots: 0,
+      frontier: [],
+      activeAssignmentIds: ["build-a", "build-b", "build-c"],
+      decisionRequiredAssignmentIds: [],
+      nodes: [
+        node("build-a", 1),
+        node("build-b", 2),
+        node("build-c", 3, "ASSIGNED"),
+      ],
+      waves: [
+        {
+          id: "wave-concurrent",
+          assignmentIds: ["build-a", "build-b", "build-c"],
+          serializedAssignmentIds: [],
+          deferredAssignmentIds: [],
+          status: "WORKING",
+        },
+      ],
+      decisionRooms: [],
+    },
+    events: [
+      {
+        ...event(1, "MISSION_CREATED", "2026-08-08T09:00:00.000Z"),
+        missionId: "mission-concurrent-builders",
+      },
+      {
+        ...event(
+          2,
+          "EXECUTION_WAVE_DISPATCHED",
+          "2026-08-08T09:01:00.000Z",
+        ),
+        missionId: "mission-concurrent-builders",
+        data: {
+          wave: {
+            id: "wave-concurrent",
+            assignmentIds: ["build-a", "build-b"],
+          },
+        },
+      },
+      {
+        ...event(3, "EXECUTION_RUN_STARTED", "2026-08-08T09:01:00.000Z"),
+        missionId: "mission-concurrent-builders",
+        data: { assignmentId: "build-a", waveId: "wave-concurrent" },
+      },
+      {
+        ...event(4, "EXECUTION_RUN_STARTED", "2026-08-08T09:02:00.000Z"),
+        missionId: "mission-concurrent-builders",
+        data: { assignmentId: "build-b", waveId: "wave-concurrent" },
+      },
+    ],
+  };
+
+  const model = deriveMissionFlowModel(mission);
+  assert.deepEqual(
+    Object.fromEntries(
+      model.agentCards.map((card) => [
+        card.assignmentId,
+        {
+          roleId: card.id,
+          runtimeStatus: card.runtimeStatus,
+          queuePosition: card.queuePosition,
+        },
+      ]),
+    ),
+    {
+      "build-a": {
+        roleId: "terra_builder",
+        runtimeStatus: "WORKING",
+        queuePosition: null,
+      },
+      "build-b": {
+        roleId: "terra_builder",
+        runtimeStatus: "WORKING",
+        queuePosition: null,
+      },
+      "build-c": {
+        roleId: "terra_builder",
+        runtimeStatus: "ASSIGNED",
+        queuePosition: 1,
+      },
+    },
+  );
+  assert.equal(
+    model.team.filter((card) => card.id === "terra_builder").length,
+    3,
+  );
+});
+
 test("Mission Flow derives lifecycle completion and evidence counts without inventing confidence", () => {
   let generatedId = 0;
   const orchestrator = createMissionOrchestrator({
@@ -310,6 +439,10 @@ test("team telemetry is derived only from observable Assignment and Run state", 
     elapsedTime: "2m",
     latestEvidence: "evidence://event-inventory",
     missionId: "mission-observed",
+    assignmentId: "assignment-001",
+    runId: "run-001",
+    queuePosition: null,
+    cardId: "mission-observed:assignment-001:run-001",
   };
 
   assert.deepEqual(
@@ -1033,6 +1166,249 @@ test("Review Ledger derives the exact current release decision without inventing
         ],
         externalActionExecuted: false,
       },
+    },
+  );
+});
+
+test("Mission Flow derives Task Graph, agent cards, Decision Rooms, and Activity only from replayed execution events", () => {
+  const mission = {
+    id: "mission-execution",
+    brief,
+    status: "RUNNING",
+    contextPackVersion: 1,
+    allowedActions: ["dispatch_execution_wave"],
+    execution: {
+      capacity: 4,
+      reservedSlots: 1,
+      workerCapacity: 3,
+      availableWorkerSlots: 3,
+      frontier: ["review-output"],
+      activeAssignmentIds: [],
+      decisionRequiredAssignmentIds: [],
+      nodes: [
+        {
+          assignment: {
+            id: "build-output",
+            goal: "Build the execution-wave module",
+            effectivePermission: "workspace-write",
+          },
+          dependsOn: [],
+          requiresDecision: false,
+          status: "COMPLETED",
+          agent: {
+            roleId: "terra_builder",
+            roleName: "Terra Builder",
+            capability: "implementation",
+            effectivePermission: "workspace-write",
+          },
+          run: {
+            id: "run-build",
+            status: "COMPLETED",
+            startedAt: "2026-08-08T09:00:00.000Z",
+            updatedAt: "2026-08-08T09:02:00.000Z",
+            evidence: [
+              {
+                ref: "evidence://build-output",
+                kind: "test",
+                summary: "Execution contracts passed",
+              },
+            ],
+          },
+          artifacts: [{ uri: "artifact://build-output" }],
+          evidenceRefs: ["evidence://build-output"],
+        },
+        {
+          assignment: {
+            id: "review-output",
+            goal: "Review the execution-wave module",
+            effectivePermission: "read-only",
+          },
+          dependsOn: ["build-output"],
+          requiresDecision: false,
+          status: "PENDING",
+          agent: null,
+          run: null,
+          artifacts: [],
+          evidenceRefs: [],
+        },
+      ],
+      waves: [
+        {
+          id: "wave-1",
+          capacity: 4,
+          reservedSlots: 1,
+          workerCapacity: 3,
+          assignmentIds: ["build-output"],
+          serializedAssignmentIds: [],
+          deferredAssignmentIds: [],
+          status: "COMPLETED",
+        },
+      ],
+      decisionRooms: [
+        {
+          id: "decision-room:seam",
+          assignmentId: "build-output",
+          question: "Which seam owns wave invariants?",
+          participantRoles: ["orchestrator", "sol_architect"],
+          alternatives: [
+            {
+              id: "module",
+              label: "Deep module",
+              tradeoffs: ["Extra file", "Single replay policy"],
+            },
+            {
+              id: "inline",
+              label: "Inline",
+              tradeoffs: ["Fewer files", "Larger Orchestrator"],
+            },
+          ],
+          recommendation: {
+            alternativeId: "module",
+            rationale: "Keep replay policy local",
+          },
+          validationPlan: ["Replay forged events"],
+          inputEvidenceRefs: ["evidence://seam-options"],
+          status: "RESOLVED",
+          decision: {
+            selectedAlternativeId: "module",
+            rationale: "Replay safety wins",
+            actor: "mission-owner",
+          },
+        },
+      ],
+    },
+    events: [
+      {
+        ...event(1, "MISSION_CREATED", "2026-08-08T08:55:00.000Z"),
+        missionId: "mission-execution",
+      },
+      {
+        ...event(2, "EXECUTION_WAVE_DISPATCHED", "2026-08-08T09:00:00.000Z"),
+        missionId: "mission-execution",
+        actor: "mission-owner",
+        reason: "Dispatch safe wave",
+        data: {
+          wave: { id: "wave-1", assignmentIds: ["build-output"] },
+        },
+      },
+      {
+        ...event(3, "EXECUTION_RUN_STARTED", "2026-08-08T09:00:00.000Z"),
+        missionId: "mission-execution",
+        actor: "agent:terra_builder",
+        reason: "Started build-output",
+        data: { assignmentId: "build-output", waveId: "wave-1" },
+      },
+      {
+        ...event(
+          4,
+          "EXECUTION_RUN_COMPLETED",
+          "2026-08-08T09:02:00.000Z",
+          ["evidence://build-output"],
+        ),
+        missionId: "mission-execution",
+        actor: "agent:terra_builder",
+        reason: "Completed build-output",
+        data: { assignmentId: "build-output", waveId: "wave-1" },
+      },
+      {
+        ...event(5, "DECISION_ROOM_RESOLVED", "2026-08-08T09:03:00.000Z"),
+        missionId: "mission-execution",
+        actor: "mission-owner",
+        reason: "Resolved execution seam",
+        data: { decision: { roomId: "decision-room:seam" } },
+      },
+    ],
+  };
+
+  const model = deriveMissionFlowModel(mission);
+  const terra = model.team.find((role) => role.id === "terra_builder");
+
+  assert.deepEqual(model.execution.summary, {
+    capacity: 4,
+    reservedSlots: 1,
+    workerCapacity: 3,
+    availableWorkerSlots: 3,
+    completedAssignments: 1,
+    totalAssignments: 2,
+  });
+  assert.deepEqual(
+    model.execution.nodes.map((node) => ({
+      id: node.id,
+      dependsOn: node.dependsOn,
+      status: node.status,
+      roleId: node.roleId,
+      latestEvidence: node.latestEvidence,
+    })),
+    [
+      {
+        id: "build-output",
+        dependsOn: [],
+        status: "COMPLETED",
+        roleId: "terra_builder",
+        latestEvidence: "evidence://build-output",
+      },
+      {
+        id: "review-output",
+        dependsOn: ["build-output"],
+        status: "PENDING",
+        roleId: null,
+        latestEvidence: null,
+      },
+    ],
+  );
+  assert.deepEqual(model.execution.frontier, ["review-output"]);
+  assert.equal(model.execution.decisionRooms[0].status, "RESOLVED");
+  assert.deepEqual(
+    model.execution.activity.map((item) => ({
+      sequence: item.sequence,
+      type: item.type,
+      actor: item.actor,
+      assignmentId: item.assignmentId,
+      evidenceRefs: item.evidenceRefs,
+    })),
+    [
+      {
+        sequence: 5,
+        type: "DECISION_ROOM_RESOLVED",
+        actor: "mission-owner",
+        assignmentId: "build-output",
+        evidenceRefs: [],
+      },
+      {
+        sequence: 4,
+        type: "EXECUTION_RUN_COMPLETED",
+        actor: "agent:terra_builder",
+        assignmentId: "build-output",
+        evidenceRefs: ["evidence://build-output"],
+      },
+      {
+        sequence: 3,
+        type: "EXECUTION_RUN_STARTED",
+        actor: "agent:terra_builder",
+        assignmentId: "build-output",
+        evidenceRefs: [],
+      },
+      {
+        sequence: 2,
+        type: "EXECUTION_WAVE_DISPATCHED",
+        actor: "mission-owner",
+        assignmentId: null,
+        evidenceRefs: [],
+      },
+    ],
+  );
+  assert.deepEqual(
+    {
+      connection: terra.connection,
+      assignment: terra.assignment,
+      runtimeStatus: terra.runtimeStatus,
+      latestEvidence: terra.latestEvidence,
+    },
+    {
+      connection: "Observed",
+      assignment: "Build the execution-wave module",
+      runtimeStatus: "COMPLETED",
+      latestEvidence: "evidence://build-output",
     },
   );
 });
