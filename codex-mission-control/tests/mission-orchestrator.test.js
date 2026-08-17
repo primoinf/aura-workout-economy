@@ -4177,12 +4177,43 @@ test("independent reviewer findings return only owned work and its downstream re
     },
   );
 
+  assert.throws(
+    () =>
+      orchestrator.execute(created.id, {
+        type: "REJECT_REVIEW",
+        payload: {
+          review: {
+            summary: "Attempt to replace the reviewed candidate closure",
+            reviewerAssignmentId: "review-candidate",
+            outcome: "CHANGES_REQUESTED",
+            candidateArtifactRefs: ["artifact://forged-candidate"],
+            findings: [
+              {
+                triggeringScenario: "build-a transport emits a terminal error",
+                ownerAssignmentId: "build-a",
+                summary: "Preserve Assignment ownership on the error event",
+              },
+            ],
+          },
+        },
+        actor: "agent:sol_reviewer",
+        reason: "Attempt to reject a different candidate closure",
+        evidenceRefs: ["evidence://review-candidate/1"],
+      }),
+    /current independent reviewer Evidence and actor/,
+  );
+
   const changesRequested = orchestrator.execute(created.id, {
     type: "REJECT_REVIEW",
     payload: {
       review: {
         summary: "Replay loses the owner on one execution error path",
         reviewerAssignmentId: "review-candidate",
+        outcome: "CHANGES_REQUESTED",
+        candidateArtifactRefs: [
+          "artifact://build-a/1",
+          "artifact://build-b/1",
+        ],
         findings: [
           {
             triggeringScenario: "build-a transport emits a terminal error",

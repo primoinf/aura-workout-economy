@@ -3,6 +3,7 @@ import {
   createBrowserWriteCoordinator,
   createLocalStorageEventStore,
   createMissionOrchestrator,
+  getOpenExecutionTransportReservations,
 } from "./mission-orchestrator.js";
 import {
   deriveApprovalRoomModel,
@@ -382,6 +383,10 @@ const nextSteps = {
         review: {
           summary: "Independent reviewer requested owned corrections",
           reviewerAssignmentId: reviewerNode.assignment.id,
+          outcome: reviewerNode.reviewOutcome.outcome,
+          candidateArtifactRefs: structuredClone(
+            reviewerNode.reviewOutcome.candidateArtifactRefs,
+          ),
           findings: structuredClone(reviewerNode.reviewOutcome.findings),
         },
       };
@@ -398,6 +403,29 @@ const nextSteps = {
     },
     actor: (mission) =>
       mission.execution ? "agent:sol_reviewer" : "mission-owner",
+  },
+  recover_execution_transport: {
+    label: "Recover Stalled Transport",
+    eyebrow: "Explicit Recovery",
+    description:
+      "After confirming the old transport cannot continue, release its durable worker reservation for this Mission.",
+    reason: "Mission owner recovered a stalled execution transport reservation",
+    payload: (mission) => {
+      const reservation = getOpenExecutionTransportReservations(mission)[0];
+      if (!reservation) {
+        throw new Error("No open execution transport reservation remains.");
+      }
+      return {
+        recovery: {
+          assignmentId: reservation.assignmentId,
+          waveId: reservation.waveId,
+          attempt: reservation.attempt,
+          summary:
+            "Confirmed the prior transport cannot continue and released its durable reservation",
+        },
+      };
+    },
+    evidenceRefs: [],
   },
   pass_validation: {
     label: "Pass Validation",
@@ -1583,6 +1611,14 @@ async function advanceMission(action, overrides = {}) {
     action === "cancel_mission" &&
     !window.confirm(
       "Cancel this Mission? The event history will remain readable, but cancellation is terminal.",
+    )
+  ) {
+    return;
+  }
+  if (
+    action === "recover_execution_transport" &&
+    !window.confirm(
+      "Recover this transport reservation only after confirming the prior transport cannot continue. Continue?",
     )
   ) {
     return;

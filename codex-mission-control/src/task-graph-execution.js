@@ -170,6 +170,11 @@ function assertTaskGraph(taskGraph, { requireIndependentReview = false } = {}) {
   if (typeof taskGraph.coordinationRequired !== "boolean") {
     throw new Error("Task Graph coordinationRequired must be a boolean.");
   }
+  if (taskGraph.coordinationRequired && taskGraph.capacity < 2) {
+    throw new Error(
+      "A coordinated Task Graph requires at least one worker slot in addition to the reserved Orchestrator slot.",
+    );
+  }
   if (
     !Array.isArray(taskGraph.assignments) ||
     taskGraph.assignments.length === 0

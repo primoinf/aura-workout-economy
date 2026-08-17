@@ -228,6 +228,12 @@ const EXECUTION_COMMANDS = {
     eventType: "EXECUTION_ASSIGNMENT_RETRIED",
     field: "retry",
   },
+  RECOVER_EXECUTION_TRANSPORT: {
+    action: "recover_execution_transport",
+    from: ["BLOCKED", "CANCELLED"],
+    eventType: "EXECUTION_TRANSPORT_RECOVERED",
+    field: "recovery",
+  },
 };
 
 const CHANGES_REQUESTED_ACTIONS = Object.freeze([
@@ -242,11 +248,22 @@ const COMMAND_BY_STATUS = Object.fromEntries(
 );
 
 function allowedActionsForMission(mission) {
-  if (["COMPLETED", "CANCELLED"].includes(mission.status)) {
+  if (mission.status === "CANCELLED") {
+    return getOpenExecutionTransportReservations(mission).length > 0
+      ? ["recover_execution_transport"]
+      : [];
+  }
+  if (mission.status === "COMPLETED") {
     return [];
   }
   if (mission.status === "BLOCKED") {
-    return ["resume_mission", "cancel_mission"];
+    return getOpenExecutionTransportReservations(mission).length > 0
+      ? [
+          "recover_execution_transport",
+          "resume_mission",
+          "cancel_mission",
+        ]
+      : ["resume_mission", "cancel_mission"];
   }
   if (
     mission.execution &&
@@ -371,12 +388,49 @@ const EXECUTION_EVENT_TYPES = new Set([
   ...Object.values(EXECUTION_COMMANDS).map((command) => command.eventType),
 ]);
 
+const EXECUTION_TRANSPORT_RELEASE_EVENT_TYPES = new Set([
+  "EXECUTION_TRANSPORT_SETTLED",
+  "EXECUTION_TRANSPORT_RECOVERED",
+]);
+
 function clone(value) {
   return structuredClone(value);
 }
 
 function sameValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function getOpenExecutionTransportReservations(mission) {
+  const reservations = new Map();
+  for (const event of mission?.events ?? []) {
+    if (
+      event.type === "EXECUTION_WAVE_DISPATCHED" &&
+      event.data?.transportReservationsTracked === true
+    ) {
+      for (const routing of event.data.routings ?? []) {
+        const assignmentId = routing.assignment?.id;
+        const waveId = event.data.wave?.id;
+        reservations.set(`${waveId}:${assignmentId}`, {
+          assignmentId,
+          attempt: event.data.transportReservationAttempts?.[assignmentId],
+          waveId,
+          assignment: clone(routing.assignment),
+          coordinationRequired: (event.data.wave?.reservedSlots ?? 0) > 0,
+        });
+      }
+    }
+    if (EXECUTION_TRANSPORT_RELEASE_EVENT_TYPES.has(event.type)) {
+      const releaseDetails =
+        event.type === "EXECUTION_TRANSPORT_RECOVERED"
+          ? event.data?.recovery
+          : event.data;
+      reservations.delete(
+        `${releaseDetails?.waveId}:${releaseDetails?.assignmentId}`,
+      );
+    }
+  }
+  return [...reservations.values()];
 }
 
 function normalizeLegacyOwnershipPath(path) {
@@ -647,6 +701,7 @@ function assertBlockDetails(block, errorPrefix) {
     typeof block.blocker !== "string" ||
     block.blocker.trim() === "" ||
     !Array.isArray(block.attemptedAlternatives) ||
+    block.attemptedAlternatives.length === 0 ||
     block.attemptedAlternatives.some(
       (alternative) =>
         typeof alternative !== "string" || alternative.trim() === "",
@@ -656,6 +711,26 @@ function assertBlockDetails(block, errorPrefix) {
   ) {
     throw new Error(
       `${errorPrefix} requires blocker, attempted alternatives, and required authority or input.`,
+    );
+  }
+}
+
+function assertTransportRecoveryDetails(recovery, errorPrefix) {
+  if (
+    !recovery ||
+    typeof recovery !== "object" ||
+    Array.isArray(recovery) ||
+    typeof recovery.assignmentId !== "string" ||
+    recovery.assignmentId.trim() === "" ||
+    typeof recovery.waveId !== "string" ||
+    recovery.waveId.trim() === "" ||
+    !Number.isInteger(recovery.attempt) ||
+    recovery.attempt < 1 ||
+    typeof recovery.summary !== "string" ||
+    recovery.summary.trim() === ""
+  ) {
+    throw new Error(
+      `${errorPrefix} requires Assignment, wave, attempt, and recovery summary.`,
     );
   }
 }
@@ -1100,10 +1175,17 @@ function assertCurrentIndependentReviewerEvidence(mission, event) {
 }
 
 function projectExecutionEvent(mission, event) {
-  if (event.type === "EXECUTION_TRANSPORT_SETTLED") {
-    const { assignmentId, waveId, attempt } = event.data ?? {};
+  if (EXECUTION_TRANSPORT_RELEASE_EVENT_TYPES.has(event.type)) {
+    const releaseDetails =
+      event.type === "EXECUTION_TRANSPORT_RECOVERED"
+        ? event.data?.recovery
+        : event.data;
+    const { assignmentId, waveId, attempt } = releaseDetails ?? {};
     if (
-      event.actor !== "agent-router" ||
+      (event.type === "EXECUTION_TRANSPORT_SETTLED" &&
+        event.actor !== "agent-router") ||
+      (event.type === "EXECUTION_TRANSPORT_RECOVERED" &&
+        (event.actor === "agent-router" || event.actor.startsWith("agent:"))) ||
       typeof assignmentId !== "string" ||
       assignmentId.trim() === "" ||
       typeof waveId !== "string" ||
@@ -1112,8 +1194,28 @@ function projectExecutionEvent(mission, event) {
       attempt < 1
     ) {
       throw new Error(
-        `Cannot replay event ${event.sequence}: execution transport settlement is invalid.`,
+        `Cannot replay event ${event.sequence}: execution transport release is invalid.`,
       );
+    }
+    if (event.type === "EXECUTION_TRANSPORT_RECOVERED") {
+      if (!["BLOCKED", "CANCELLED"].includes(mission.status)) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: execution transport recovery requires a blocked or cancelled Mission.`,
+        );
+      }
+      assertTransportRecoveryDetails(
+        event.data.recovery,
+        `Cannot replay event ${event.sequence}: execution transport recovery`,
+      );
+      if (
+        event.data.recovery.assignmentId !== assignmentId ||
+        event.data.recovery.waveId !== waveId ||
+        event.data.recovery.attempt !== attempt
+      ) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: execution transport recovery details do not match the released reservation.`,
+        );
+      }
     }
     const dispatch = mission.events.find(
       (candidate) =>
@@ -1121,18 +1223,19 @@ function projectExecutionEvent(mission, event) {
         candidate.type === "EXECUTION_WAVE_DISPATCHED" &&
         candidate.data?.transportReservationsTracked === true &&
         candidate.data?.wave?.id === waveId &&
-        candidate.data.wave.assignmentIds?.includes(assignmentId),
+        candidate.data.wave.assignmentIds?.includes(assignmentId) &&
+        candidate.data.transportReservationAttempts?.[assignmentId] === attempt,
     );
     const duplicate = mission.events.some(
       (candidate) =>
         candidate.sequence < event.sequence &&
-        candidate.type === "EXECUTION_TRANSPORT_SETTLED" &&
+        EXECUTION_TRANSPORT_RELEASE_EVENT_TYPES.has(candidate.type) &&
         candidate.data?.waveId === waveId &&
         candidate.data?.assignmentId === assignmentId,
     );
     if (!dispatch || duplicate) {
       throw new Error(
-        `Cannot replay event ${event.sequence}: execution transport settlement does not match one open reservation.`,
+        `Cannot replay event ${event.sequence}: execution transport release does not match one open reservation.`,
       );
     }
     return;
@@ -1146,6 +1249,39 @@ function projectExecutionEvent(mission, event) {
     "DECISION_ROOM_OPENED",
     "DECISION_ROOM_RESOLVED",
   ].includes(event.type);
+  if (
+    event.type === "EXECUTION_WAVE_DISPATCHED" &&
+    event.data?.transportReservationsTracked !== true
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: execution wave dispatch requires durable transport reservation tracking.`,
+    );
+  }
+  if (
+    event.type === "EXECUTION_WAVE_DISPATCHED" &&
+    Array.isArray(event.data.routings)
+  ) {
+    const reservationAttempts = event.data.transportReservationAttempts;
+    const assignmentIds = event.data.wave?.assignmentIds ?? [];
+    if (
+      !reservationAttempts ||
+      typeof reservationAttempts !== "object" ||
+      Array.isArray(reservationAttempts) ||
+      assignmentIds.some((assignmentId) => {
+        const node = mission.execution.nodes.find(
+          (candidate) => candidate.assignment.id === assignmentId,
+        );
+        return (
+          !Number.isInteger(reservationAttempts[assignmentId]) ||
+          reservationAttempts[assignmentId] !== (node?.attempt ?? -1) + 1
+        );
+      })
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: execution wave dispatch requires one current transport reservation attempt per Assignment.`,
+      );
+    }
+  }
   if (
     event.type === "EXECUTION_WAVE_DISPATCHED" &&
     Array.isArray(event.data.routings)
@@ -1272,6 +1408,11 @@ function projectCorrectionEvent(mission, event) {
       if (
         !reviewerNode ||
         event.actor !== `agent:${reviewerNode.agent?.roleId}` ||
+        event.data.review.outcome !== "CHANGES_REQUESTED" ||
+        !sameValue(
+          event.data.review.candidateArtifactRefs,
+          reviewerNode.reviewOutcome?.candidateArtifactRefs,
+        ) ||
         event.evidenceRefs.length !== reviewerNode.evidenceRefs.length ||
         event.evidenceRefs.some(
           (reference, index) =>
@@ -2449,13 +2590,22 @@ export function createMissionOrchestrator({
       try {
         await writeCoordinator.runExclusive(() => {
           const mission = getMission(missionId);
-          const alreadySettled = mission.events.some(
-            (event) =>
-              event.type === "EXECUTION_TRANSPORT_SETTLED" &&
-              event.data?.waveId === waveId &&
-              event.data?.assignmentId === routing.assignment.id,
+          const alreadyReleased = mission.events.some(
+            (event) => {
+              if (!EXECUTION_TRANSPORT_RELEASE_EVENT_TYPES.has(event.type)) {
+                return false;
+              }
+              const releaseDetails =
+                event.type === "EXECUTION_TRANSPORT_RECOVERED"
+                  ? event.data?.recovery
+                  : event.data;
+              return (
+                releaseDetails?.waveId === waveId &&
+                releaseDetails?.assignmentId === routing.assignment.id
+              );
+            },
           );
-          if (alreadySettled) return mission;
+          if (alreadyReleased) return mission;
           return appendAgentEvent(missionId, {
             type: "EXECUTION_TRANSPORT_SETTLED",
             actor: "agent-router",
@@ -2474,31 +2624,13 @@ export function createMissionOrchestrator({
   }
 
   function activeTrackedTransportReservations(missionId, mission) {
-    const reservations = new Map();
-    for (const event of mission.events) {
-      if (
-        event.type === "EXECUTION_WAVE_DISPATCHED" &&
-        event.data?.transportReservationsTracked === true
-      ) {
-        for (const routing of event.data.routings ?? []) {
-          reservations.set(
-            `${event.data.wave.id}:${routing.assignment.id}`,
-            {
-              missionId,
-              assignment: clone(routing.assignment),
-              coordinationRequired:
-                (event.data.wave.reservedSlots ?? 0) > 0,
-            },
-          );
-        }
-      }
-      if (event.type === "EXECUTION_TRANSPORT_SETTLED") {
-        reservations.delete(
-          `${event.data.waveId}:${event.data.assignmentId}`,
-        );
-      }
-    }
-    return [...reservations.values()];
+    return getOpenExecutionTransportReservations(mission).map(
+      (reservation) => ({
+        missionId,
+        assignment: clone(reservation.assignment),
+        coordinationRequired: reservation.coordinationRequired,
+      }),
+    );
   }
 
   function buildGlobalExecutionPlanningContext(missionId, mission) {
@@ -2667,6 +2799,14 @@ export function createMissionOrchestrator({
           id: createId("wave"),
           ...wavePlan,
         };
+        const transportReservationAttempts = Object.fromEntries(
+          routings.map((routing) => {
+            const node = mission.execution.nodes.find(
+              (candidate) => candidate.assignment.id === routing.assignment.id,
+            );
+            return [routing.assignment.id, node.attempt + 1];
+          }),
+        );
         const dispatched = appendAgentEvent(missionId, {
           type: "EXECUTION_WAVE_DISPATCHED",
           actor,
@@ -2676,6 +2816,7 @@ export function createMissionOrchestrator({
             routings,
             planningContext,
             transportReservationsTracked: true,
+            transportReservationAttempts,
           },
         });
         const attempts = routings.map((routing) =>
@@ -2894,6 +3035,12 @@ export function createMissionOrchestrator({
         }
         if (type === "BLOCK_MISSION") {
           assertBlockDetails(payload.block, "BLOCK_MISSION");
+        }
+        if (type === "RECOVER_EXECUTION_TRANSPORT") {
+          assertTransportRecoveryDetails(
+            payload.recovery,
+            "RECOVER_EXECUTION_TRANSPORT",
+          );
         }
         if (
           type === "START_CORRECTION" &&

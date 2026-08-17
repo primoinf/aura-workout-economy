@@ -171,6 +171,33 @@ function createPlannedMission(orchestrator, id, assignments = [task(id)]) {
   return orchestrator.getMission(created.id);
 }
 
+test("Mission blocking rejects an empty attempted-alternatives record", () => {
+  const orchestrator = createHarness();
+  const created = orchestrator.createMission({
+    brief,
+    actor: "mission-owner",
+    reason: "Create a Mission for block contract validation",
+  });
+
+  assert.throws(
+    () =>
+      orchestrator.execute(created.id, {
+        type: "BLOCK_MISSION",
+        payload: {
+          block: {
+            blocker: "Required input is unavailable",
+            attemptedAlternatives: [],
+            requiredAuthorityOrInput: "Mission owner input",
+          },
+        },
+        actor: "mission-owner",
+        reason: "Reject an incomplete block record",
+      }),
+    /requires blocker, attempted alternatives, and required authority or input/,
+  );
+  assert.equal(orchestrator.getMission(created.id).events.length, 1);
+});
+
 test("Task Graph and legacy single-Assignment lifecycles cannot be mixed", async () => {
   const orchestrator = createHarness();
   const planned = createPlannedMission(orchestrator, "graph-task");
@@ -215,6 +242,30 @@ test("Task Graph and legacy single-Assignment lifecycles cannot be mixed", async
     reason: "Dispatch the replacement legacy Assignment",
   });
   assert.equal(completed.status, "IN_REVIEW");
+});
+
+test("Task Graph wave replay fails closed when durable transport tracking is missing", async () => {
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createHarness(createImmediateRouter(), eventStore);
+  const planned = createPlannedMission(orchestrator, "tracked-wave");
+  const completed = await orchestrator.dispatchExecutionWave(planned.id, {
+    actor: "mission-owner",
+    reason: "Record a durable tracked wave",
+  });
+  const forgedEvents = structuredClone(completed.events);
+  const waveEvent = forgedEvents.find(
+    (event) => event.type === "EXECUTION_WAVE_DISPATCHED",
+  );
+  delete waveEvent.data.transportReservationsTracked;
+
+  assert.throws(
+    () =>
+      createHarness(
+        createImmediateRouter(),
+        createMemoryEventStore({ [planned.id]: forgedEvents }),
+      ).getMission(planned.id),
+    /requires durable transport reservation tracking/,
+  );
 });
 
 test("04c6ba7 Mission history normalizes legacy ownership aliases and Sol Reviewer metadata", async () => {
@@ -1160,6 +1211,121 @@ test("cancelling an active execution wave retains capacity until every transport
     reason: "Use capacity after cancelled transports settled",
   });
   assert.ok(requests.includes("available-after-cancel"));
+});
+
+test("explicit recovery releases durable orphan reservations after a Mission restart", async () => {
+  let releaseTransport;
+  const transportGate = new Promise((resolve) => {
+    releaseTransport = resolve;
+  });
+  let signalAllStarted;
+  let startedCount = 0;
+  const allStarted = new Promise((resolve) => {
+    signalAllStarted = resolve;
+  });
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        startedCount += 1;
+        yield {
+          kind: "started",
+          runId: `run:${request.assignment.id}`,
+          occurredAt: "2026-08-08T13:00:00.000Z",
+        };
+        if (startedCount === 3) signalAllStarted();
+        await transportGate;
+        yield {
+          kind: "completed",
+          runId: `run:${request.assignment.id}`,
+          occurredAt: "2026-08-08T13:01:00.000Z",
+          summary: `Completed ${request.assignment.id}`,
+          artifacts: [
+            {
+              name: request.assignment.id,
+              uri: `artifact://${request.assignment.id}`,
+            },
+          ],
+          evidence: [
+            {
+              ref: `evidence://${request.assignment.id}`,
+              kind: "test",
+              summary: `Observed ${request.assignment.id}`,
+            },
+          ],
+        };
+      },
+    },
+  });
+  const eventStore = createMemoryEventStore();
+  const worker = createHarness(agentRouter, eventStore);
+  const planned = createPlannedMission(worker, "orphan-recovery", [
+    task("orphan-a"),
+    task("orphan-b"),
+    task("orphan-c"),
+  ]);
+  const dispatch = worker.dispatchExecutionWave(planned.id, {
+    actor: "mission-owner",
+    reason: "Start the wave that may outlive this tab",
+  });
+  await allStarted;
+  const blocked = worker.execute(planned.id, {
+    type: "BLOCK_MISSION",
+    payload: {
+      block: {
+        blocker: "The worker tab was closed before transport settlement",
+        attemptedAlternatives: ["Waited for the transport to settle"],
+        requiredAuthorityOrInput: "Mission owner confirmation of transport state",
+      },
+    },
+    actor: "mission-owner",
+    reason: "Block the orphaned execution wave safely",
+  });
+  let recoveryEventNumber = 0;
+  const restarted = createMissionOrchestrator({
+    eventStore,
+    agentRouter: createImmediateRouter(),
+    createId: (kind) =>
+      kind === "mission"
+        ? "unused-recovery-mission"
+        : `recovery-event-${++recoveryEventNumber}`,
+    clock: () => "2026-08-08T13:02:00.000Z",
+  });
+  const dispatchEvent = blocked.events.find(
+    (event) => event.type === "EXECUTION_WAVE_DISPATCHED",
+  );
+  assert.deepEqual(
+    restarted.getMission(planned.id).allowedActions,
+    ["recover_execution_transport", "resume_mission", "cancel_mission"],
+  );
+
+  let recovered = restarted.getMission(planned.id);
+  for (const routing of dispatchEvent.data.routings) {
+    const assignmentId = routing.assignment.id;
+    recovered = restarted.execute(planned.id, {
+      type: "RECOVER_EXECUTION_TRANSPORT",
+      payload: {
+        recovery: {
+          assignmentId,
+          waveId: dispatchEvent.data.wave.id,
+          attempt: dispatchEvent.data.transportReservationAttempts[assignmentId],
+          summary: `Confirmed the orphaned ${assignmentId} transport cannot continue`,
+        },
+      },
+      actor: "mission-owner",
+      reason: `Release the orphaned ${assignmentId} reservation after restart`,
+    });
+  }
+  assert.deepEqual(recovered.allowedActions, ["resume_mission", "cancel_mission"]);
+
+  releaseTransport();
+  const settledAfterRecovery = await dispatch;
+  assert.equal(settledAfterRecovery.status, "BLOCKED");
+  assert.equal(
+    settledAfterRecovery.events.filter(
+      (event) => event.type === "EXECUTION_TRANSPORT_SETTLED",
+    ).length,
+    0,
+  );
 });
 
 test("cross-tab cancellation identifies the changed Mission and aborts its transport", async () => {

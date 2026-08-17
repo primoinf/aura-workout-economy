@@ -173,6 +173,17 @@ function completeNode(
   return next;
 }
 
+test("coordinated Task Graphs reject a capacity that leaves no worker slot", () => {
+  assert.throws(
+    () =>
+      executionFor([task("orchestrator-only")], {
+        capacity: 1,
+        coordinationRequired: true,
+      }),
+    /requires at least one worker slot/,
+  );
+});
+
 test("Task Graph rejects non-canonical ownership aliases before planning", () => {
   assert.throws(
     () =>
