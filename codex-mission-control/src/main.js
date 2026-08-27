@@ -24,6 +24,23 @@ import {
 } from "./approval-room-view.js";
 import { renderTaskExecutionContent } from "./execution-room-view.js";
 import { nextDecisionRoomInput } from "./task-graph-execution.js";
+import {
+  buildPlaybookActionCommand,
+  derivePlaybookRoomModel,
+  renderPlaybookRoomContent,
+} from "./playbook-room-view.js";
+import {
+  DASHBOARD_FILTER_DEFAULTS,
+  deriveOperationsDashboard,
+  parseDashboardFilters,
+  serializeDashboardFilters,
+} from "./operations-dashboard.js";
+import { renderOperationsDashboardContent } from "./operations-dashboard-view.js";
+import {
+  buildMissionNavigation,
+  renderMissionNavigation,
+} from "./mission-navigation.js";
+import { renderMissionAuditView } from "./mission-audit-views.js";
 
 const liveAgentTransport = globalThis.codexAgentTransport ?? null;
 const localObservedTransport = {
@@ -69,8 +86,16 @@ const localObservedTransport = {
             ? {
                 reviewOutcome: {
                   outcome: "PASSED",
-                  candidateArtifactRefs:
-                    reviewContext?.candidateArtifactRefs ?? [],
+                  ...(reviewContext?.playbook
+                    ? {
+                        ...structuredClone(reviewContext.playbook),
+                        rationale:
+                          "The local read-only Sol Reviewer simulation found no critical regression or unmet declared target.",
+                      }
+                    : {
+                        candidateArtifactRefs:
+                          reviewContext?.candidateArtifactRefs ?? [],
+                      }),
                   findings: [],
                 },
               }
@@ -566,6 +591,7 @@ let activeMissionId = initialUrl.searchParams.get("mission");
 let activeView =
   initialUrl.searchParams.get("view") ??
   (activeMissionId ? "detail" : "overview");
+let dashboardFilters = parseDashboardFilters(initialUrl.search);
 let notice = null;
 let historyReadError = null;
 
@@ -576,6 +602,10 @@ function isApprovalRouteAvailable(mission) {
       (mission.status === "CHANGES_REQUESTED" &&
         mission.approval?.decision === "REJECTED"))
   );
+}
+
+function isPlaybookRouteAvailable(mission) {
+  return mission?.status === "COMPLETED";
 }
 
 function setActiveMission(
@@ -590,7 +620,11 @@ function setActiveMission(
     url.searchParams.set("view", view);
   } else {
     url.searchParams.delete("mission");
-    url.searchParams.delete("view");
+    if (view === "overview") {
+      url.searchParams.delete("view");
+    } else {
+      url.searchParams.set("view", view);
+    }
   }
   window.history.pushState({}, "", url);
   render();
@@ -598,7 +632,9 @@ function setActiveMission(
 }
 
 function focusCurrentView() {
-  document.querySelector("#page-title")?.focus();
+  document
+    .querySelector("#page-title, #approval-title, #playbook-title")
+    ?.focus();
 }
 
 function getMissions() {
@@ -614,6 +650,13 @@ function renderShell(content, view) {
     (mission) => mission.id === activeMissionId,
   );
   const approvalAvailable = isApprovalRouteAvailable(selectedMission);
+  const playbookAvailable = isPlaybookRouteAvailable(selectedMission);
+  const navigation = buildMissionNavigation({
+    activeView: view,
+    mission: selectedMission,
+    approvalAvailable,
+    playbookAvailable,
+  });
 
   app.innerHTML = `
     <div class="app-shell">
@@ -626,20 +669,7 @@ function renderShell(content, view) {
           </span>
         </button>
 
-        <nav class="nav-list">
-          <button class="nav-item ${view === "overview" ? "is-active" : ""}" type="button" data-route="overview" ${view === "overview" ? 'aria-current="page"' : ""}>
-            <span class="nav-icon" aria-hidden="true">▦</span>
-            <span>ภาพรวม</span>
-          </button>
-          <button class="nav-item ${view === "detail" ? "is-active" : ""}" type="button" data-route="detail" ${view === "detail" ? 'aria-current="page"' : ""} ${missions.length === 0 ? "disabled" : ""}>
-            <span class="nav-icon" aria-hidden="true">◎</span>
-            <span>Mission Flow</span>
-          </button>
-          <button class="nav-item ${view === "approval" ? "is-active" : ""}" type="button" data-route="approval" ${view === "approval" ? 'aria-current="page"' : ""} ${approvalAvailable ? "" : 'disabled title="Available when the selected release Mission requires approval"'}>
-            <span class="nav-icon" aria-hidden="true">◇</span>
-            <span class="nav-copy"><span>Approval Room</span><small>${approvalAvailable ? "Human decision" : "No decision pending"}</small></span>
-          </button>
-        </nav>
+        ${renderMissionNavigation(navigation)}
 
         <div class="sidebar-team" aria-label="Configured Codex team">
           <span class="sidebar-team-dot ${commandDeck.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}" aria-hidden="true"></span>
@@ -680,117 +710,35 @@ function renderShell(content, view) {
   wireShellEvents();
 }
 
-function renderOverview() {
+function renderOverview(view = "overview") {
   const missions = getMissions();
   const currentHistoryError = historyReadError;
-  const model = deriveCommandDeckModel(missions);
 
   if (currentHistoryError) {
     renderShell(renderHistoryError(currentHistoryError), "overview");
     return;
   }
+  const model = deriveOperationsDashboard(missions, dashboardFilters);
+  renderShell(renderOperationsDashboardContent(model), view);
+}
 
-  const missionCards =
-    model.missions.length === 0
-      ? `
-        <section class="empty-state" aria-labelledby="empty-title">
-          <span class="empty-kicker">ZERO STATE</span>
-          <h2 id="empty-title">เริ่มจาก Brief ที่มีขอบเขตชัดเจน</h2>
-          <p>กำหนด Goal, Context, Acceptance criteria และ Authority ก่อนให้ Orchestrator สร้าง event แรก ระบบนี้ไม่ commit, push หรือ deploy เอง</p>
-          <button class="primary-button" type="button" data-open-brief>สร้าง Mission แรก</button>
-        </section>
-      `
-      : model.missions.map(renderMissionCard).join("");
-  const signals =
-    model.latestSignals.length === 0
-      ? `<div class="signal-empty">Event stream จะปรากฏหลัง Brief แรกถูกยอมรับ</div>`
-      : model.latestSignals.map(renderSignal).join("");
-
+function renderAuditView(mission, view) {
   renderShell(
-    `
-      <section class="page-heading command-heading">
-        <div>
-          <p class="eyebrow">CODEX TEAM / LIVE CONTROL</p>
-          <h1 id="page-title" tabindex="-1">ภาพรวมทีม</h1>
-          <p>Command Deck สำหรับติดตาม Mission, บทบาทที่ตั้งค่าไว้ และหลักฐานจริงจาก local event history</p>
-        </div>
-        <div class="heading-meta command-mode">
-          <span>Operating mode</span>
-          <strong>Local · ${missions.some((mission) => mission.brief.releaseRequired) ? "Human-gated release" : "No release"}</strong>
-          <small>Mission Orchestrator v1</small>
-        </div>
-      </section>
-
-      <section class="metric-grid" aria-label="Mission metrics">
-        <article class="metric-card accent-cyan">
-          <span>Configured roles</span>
-          <strong>${model.metrics.configuredAgents}</strong>
-          <small>${model.metrics.agentTelemetry === "Observed" ? "Runtime state replayed from Assignment / Run events" : agentRoutingConnected ? "Transport connected · no Run observations yet" : "Local simulator ready · no Run observations yet"}</small>
-        </article>
-        <article class="metric-card accent-green">
-          <span>Active Missions</span>
-          <strong>${model.metrics.activeMissions}</strong>
-          <small>${model.metrics.activeMissions ? "Work remains in the current frontier" : "No Mission is currently active"}</small>
-        </article>
-        <article class="metric-card accent-violet">
-          <span>Completed locally</span>
-          <strong>${model.metrics.completedMissions}</strong>
-          <small>Accepted no-release outcomes</small>
-        </article>
-        <article class="metric-card accent-amber">
-          <span>Audit events</span>
-          <strong>${model.metrics.auditEvents}</strong>
-          <small>Immutable records replayed from this device</small>
-        </article>
-      </section>
-
-      <section class="section-block">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">CONFIGURED SQUAD</p>
-            <h2>ทีม Codex</h2>
-          </div>
-          <span class="honesty-note ${model.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}"><span></span> ${model.metrics.agentTelemetry === "Observed" ? "Observed Assignment / Run telemetry" : agentRoutingConnected ? "Transport connected · awaiting Run" : "Local observable simulator · awaiting Run"}</span>
-        </div>
-        <div class="team-grid">${model.team.map(renderTeamCard).join("")}</div>
-      </section>
-
-      <div class="overview-lower">
-        <section class="section-block mission-inventory" aria-labelledby="mission-queue-title">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">MISSION QUEUE</p>
-              <h2 id="mission-queue-title">Current Missions</h2>
-            </div>
-            <span class="record-count">${model.missions.length} record${model.missions.length === 1 ? "" : "s"}</span>
-          </div>
-          <div class="mission-grid">${missionCards}</div>
-        </section>
-
-        <section class="section-block signal-panel" aria-labelledby="signal-title">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">EVENT STREAM</p>
-              <h2 id="signal-title">Latest signals</h2>
-            </div>
-            <span class="live-label"><i></i>Replay</span>
-          </div>
-          <div class="signal-list">${signals}</div>
-        </section>
-      </div>
-
-      <section class="system-strip" aria-label="Mission information flow">
-        <div><span class="strip-index">01</span><strong>Brief</strong><small>Goal and authority</small></div>
-        <span class="strip-arrow" aria-hidden="true">→</span>
-        <div><span class="strip-index">02</span><strong>Context</strong><small>Versioned local snapshot</small></div>
-        <span class="strip-arrow" aria-hidden="true">→</span>
-        <div><span class="strip-index">03</span><strong>Workflow</strong><small>Guarded lifecycle commands</small></div>
-        <span class="strip-arrow" aria-hidden="true">→</span>
-        <div><span class="strip-index">04</span><strong>Evidence</strong><small>Immutable audit events</small></div>
-      </section>
-    `,
-    "overview",
+    renderMissionAuditView(mission, view, { agentRoutingConnected }),
+    view,
   );
+}
+
+function updateDashboardFilters(filters) {
+  dashboardFilters = Object.freeze({
+    ...DASHBOARD_FILTER_DEFAULTS,
+    ...filters,
+  });
+  const url = new URL(window.location.href);
+  url.search = serializeDashboardFilters(dashboardFilters, url.search);
+  window.history.pushState({}, "", url);
+  render();
+  focusCurrentView();
 }
 
 function renderTeamCard(role) {
@@ -1227,6 +1175,11 @@ function renderApprovalRoom(mission) {
   renderShell(renderApprovalRoomContent(model), "approval");
 }
 
+function renderPlaybookRoom(mission) {
+  const model = derivePlaybookRoomModel(mission);
+  renderShell(renderPlaybookRoomContent(model), "playbook");
+}
+
 function renderAgentLane(role) {
   const runtimeClass = role.runtimeStatus.toLowerCase();
   return `
@@ -1395,6 +1348,34 @@ function wireShellEvents() {
       }
     });
   });
+  document.querySelectorAll("[data-route='playbook']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mission = getMissions().find(
+        (item) => item.id === activeMissionId,
+      );
+      if (isPlaybookRouteAvailable(mission)) {
+        setActiveMission(mission.id, "playbook");
+      }
+    });
+  });
+  for (const view of ["runs", "decisions", "gates"]) {
+    document.querySelectorAll(`[data-route='${view}']`).forEach((button) => {
+      button.addEventListener("click", () => {
+        const mission = getMissions().find(
+          (item) => item.id === activeMissionId,
+        );
+        if (mission) setActiveMission(mission.id, view);
+      });
+    });
+  }
+  document.querySelectorAll("[data-route='metrics']").forEach((button) => {
+    button.addEventListener("click", () =>
+      setActiveMission(activeMissionId, "metrics"),
+    );
+  });
+  document.querySelectorAll("[data-route='settings']").forEach((button) => {
+    button.addEventListener("click", () => setActiveMission(null, "settings"));
+  });
   document.querySelectorAll("[data-mission-id]").forEach((button) => {
     button.addEventListener("click", () =>
       setActiveMission(button.dataset.missionId),
@@ -1408,6 +1389,24 @@ function wireShellEvents() {
   document.querySelectorAll("[data-close-brief]").forEach((button) => {
     button.addEventListener("click", () =>
       document.querySelector("#brief-dialog").close(),
+    );
+  });
+  document
+    .querySelector("#dashboard-filter-form")
+    ?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      updateDashboardFilters({
+        mission: String(form.get("missionFilter") ?? ""),
+        agent: String(form.get("agent") ?? "all"),
+        state: String(form.get("state") ?? "all"),
+        risk: String(form.get("risk") ?? "all"),
+        time: String(form.get("time") ?? "all"),
+      });
+    });
+  document.querySelectorAll("[data-clear-dashboard-filters]").forEach((button) => {
+    button.addEventListener("click", () =>
+      updateDashboardFilters(DASHBOARD_FILTER_DEFAULTS),
     );
   });
 
@@ -1427,6 +1426,79 @@ function wireShellEvents() {
       advanceMission(action);
     });
   });
+  document.querySelectorAll("[data-playbook-action]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      handlePlaybookAction(event.currentTarget.dataset.playbookAction);
+    });
+  });
+}
+
+async function handlePlaybookAction(action) {
+  const mission = orchestrator.getMission(activeMissionId);
+  try {
+    let updated;
+    if (action === "record_playbook_independent_review") {
+      if (!agentRoutingConnected) {
+        throw new Error(
+          "Independent Playbook review requires a connected Codex agent transport.",
+        );
+      }
+      updated = await orchestrator.dispatchPlaybookIndependentReview(
+        mission.id,
+        {
+          actor: mission.brief.releaseAuthority,
+          reason:
+            "Mission owner dispatched the bounded Playbook Candidate for independent review",
+        },
+      );
+    } else {
+      let input = {};
+      if (action === "evaluate_playbook_candidate") {
+        const source = window.prompt(
+          "Paste the bounded Candidate evaluation JSON. It must include retrospective, Baseline, Candidate, identical versioned evaluation cases, critical regression case IDs, all six metrics, and a declared target improvement.",
+        );
+        if (source === null) return;
+        input = {
+          actor: mission.brief.releaseAuthority,
+          candidate: JSON.parse(source),
+        };
+      } else if (
+        [
+          "approve_playbook_promotion",
+          "reject_playbook_candidate",
+          "rollback_playbook_version",
+        ].includes(action)
+      ) {
+        const rationale = window.prompt(
+          "Record the explicit human rationale for this immutable Playbook decision.",
+        );
+        if (rationale === null) return;
+        input = {
+          actor: mission.brief.releaseAuthority,
+          rationale: rationale.trim(),
+          evidenceRefs:
+            action === "approve_playbook_promotion"
+              ? mission.playbook.independentReview?.evidenceRefs ?? []
+              : [],
+        };
+      }
+      if (!input.actor) {
+        input.actor = mission.brief.releaseAuthority;
+      }
+      updated = await orchestrator.execute(
+        mission.id,
+        buildPlaybookActionCommand(action, input),
+      );
+    }
+    notice = {
+      kind: "success",
+      message: `${humanize(updated.playbook.status)} recorded without deployment or protected-policy mutation.`,
+    };
+  } catch (error) {
+    notice = { kind: "error", message: error.message };
+  }
+  render();
+  focusCurrentView();
 }
 
 async function handleDecisionRoomAction(event) {
@@ -1697,10 +1769,21 @@ function render() {
       isApprovalRouteAvailable(mission)
     ) {
       renderApprovalRoom(mission);
+    } else if (
+      activeView === "playbook" &&
+      isPlaybookRouteAvailable(mission)
+    ) {
+      renderPlaybookRoom(mission);
+    } else if (["runs", "decisions", "gates", "metrics"].includes(activeView)) {
+      renderAuditView(mission, activeView);
     } else {
       activeView = "detail";
       renderMissionDetail(mission);
     }
+  } else if (activeView === "settings") {
+    renderAuditView(null, "settings");
+  } else if (activeView === "metrics") {
+    renderOverview("metrics");
   } else {
     activeView = "overview";
     renderOverview();
@@ -1713,6 +1796,7 @@ window.addEventListener("popstate", () => {
   activeView =
     url.searchParams.get("view") ??
     (activeMissionId ? "detail" : "overview");
+  dashboardFilters = parseDashboardFilters(url.search);
   render();
   focusCurrentView();
 });

@@ -8,6 +8,16 @@ import {
   artifactReference,
 } from "./artifact-inspection.js";
 import {
+  createPlaybookCandidate,
+  dispatchPlaybookIndependentReview as markPlaybookReviewDispatched,
+  promotePlaybookCandidate,
+  rejectPlaybookCandidate,
+  recordIndependentPlaybookReview,
+  recordRejectedPlaybookIndependentReview,
+  rollbackPlaybookCandidate,
+  requestPlaybookPromotion,
+} from "./playbook-candidate.js";
+import {
   applyTaskReviewFindings,
   createTaskExecution,
   interruptTaskExecution,
@@ -236,6 +246,52 @@ const EXECUTION_COMMANDS = {
   },
 };
 
+const PLAYBOOK_COMMANDS = {
+  EVALUATE_PLAYBOOK_CANDIDATE: {
+    action: "evaluate_playbook_candidate",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_CANDIDATE_EVALUATED",
+    field: "candidate",
+  },
+  REQUEST_PLAYBOOK_PROMOTION: {
+    action: "request_playbook_promotion",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_PROMOTION_REQUESTED",
+    field: "request",
+  },
+  RECORD_PLAYBOOK_INDEPENDENT_REVIEW: {
+    action: "record_playbook_independent_review",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+    field: "review",
+    requiresEvidence: true,
+  },
+  APPROVE_PLAYBOOK_PROMOTION: {
+    action: "approve_playbook_promotion",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_PROMOTED",
+    field: "approval",
+    requiresEvidence: true,
+  },
+  REJECT_PLAYBOOK_CANDIDATE: {
+    action: "reject_playbook_candidate",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_REJECTED",
+    field: "rejection",
+  },
+  ROLLBACK_PLAYBOOK_VERSION: {
+    action: "rollback_playbook_version",
+    from: "COMPLETED",
+    eventType: "PLAYBOOK_ROLLED_BACK",
+    field: "rollback",
+  },
+};
+
+const PLAYBOOK_REVIEW_READ_PATHS = Object.freeze([
+  "src/mission-orchestrator.js",
+  "src/playbook-candidate.js",
+]);
+
 const CHANGES_REQUESTED_ACTIONS = Object.freeze([
   "start_correction",
   "revise_context",
@@ -254,6 +310,30 @@ function allowedActionsForMission(mission) {
       : [];
   }
   if (mission.status === "COMPLETED") {
+    if (!mission.playbook || mission.playbook.status === "NOT_EVALUATED") {
+      return ["evaluate_playbook_candidate"];
+    }
+    if (mission.playbook.status === "EVALUATED") {
+      return ["request_playbook_promotion", "reject_playbook_candidate"];
+    }
+    if (mission.playbook.status === "PROMOTION_REQUESTED") {
+      return [
+        "record_playbook_independent_review",
+        "reject_playbook_candidate",
+      ];
+    }
+    if (mission.playbook.status === "REVIEW_IN_PROGRESS") {
+      return [];
+    }
+    if (mission.playbook.status === "REVIEW_REJECTED") {
+      return ["reject_playbook_candidate"];
+    }
+    if (mission.playbook.status === "REVIEW_APPROVED") {
+      return ["approve_playbook_promotion", "reject_playbook_candidate"];
+    }
+    if (mission.playbook.status === "PROMOTED") {
+      return ["rollback_playbook_version"];
+    }
     return [];
   }
   if (mission.status === "BLOCKED") {
@@ -341,14 +421,26 @@ export const MISSION_COMMAND_BY_ACTION = Object.freeze(
       ...Object.entries(COMMANDS),
       ...Object.entries(CORRECTION_COMMANDS),
       ...Object.entries(EXECUTION_COMMANDS),
-    ].map(
-      ([commandType, command]) => [command.action, commandType],
-    ),
+      ...Object.entries(PLAYBOOK_COMMANDS),
+    ]
+      .filter(
+        ([commandType]) =>
+          commandType !== "RECORD_PLAYBOOK_INDEPENDENT_REVIEW",
+      )
+      .map(([commandType, command]) => [command.action, commandType]),
   ),
 );
 
 const EVENT_PROJECTIONS = Object.fromEntries(
   Object.values(COMMANDS).map((command) => [command.eventType, command]),
+);
+
+const PLAYBOOK_EVENT_TYPES = new Set(
+  [
+    ...Object.values(PLAYBOOK_COMMANDS).map((command) => command.eventType),
+    "PLAYBOOK_REVIEW_DISPATCHED",
+    "PLAYBOOK_INDEPENDENT_REVIEW_REJECTED",
+  ],
 );
 
 const CORRECTION_EVENT_TYPES = new Set(
@@ -399,6 +491,496 @@ function clone(value) {
 
 function sameValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function emptyPlaybookState() {
+  return {
+    status: "NOT_EVALUATED",
+    retrospective: null,
+    baseline: null,
+    candidate: null,
+    declaredTarget: null,
+    comparison: null,
+    reviewDispatch: null,
+    independentReview: null,
+    humanDecision: null,
+    promotedVersions: [],
+    rejectionHistory: [],
+    rollbackHistory: [],
+    reviewRejectionHistory: [],
+    decisionHistory: [],
+    activePromotedVersionId: null,
+  };
+}
+
+function currentPlaybookIdentity(playbook) {
+  return {
+    candidateId: playbook.candidate.id,
+    candidateVersion: playbook.candidate.version,
+    baseline: {
+      id: playbook.baseline.id,
+      version: playbook.baseline.version,
+    },
+    evaluationSet: clone(playbook.candidate.evaluationSet),
+  };
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function playbookReviewContext(playbook) {
+  return {
+    playbook: {
+      ...currentPlaybookIdentity(playbook),
+      comparison: clone(playbook.comparison),
+      retrospective: clone(playbook.retrospective),
+      baselineSnapshot: clone(playbook.baseline),
+      candidateSnapshot: clone(playbook.candidate),
+      declaredTarget: clone(playbook.declaredTarget),
+    },
+  };
+}
+
+function playbookReviewAssignment(mission) {
+  const identity = currentPlaybookIdentity(mission.playbook);
+  return {
+    id: `playbook-review:${mission.id}:${identity.candidateId}@${identity.candidateVersion}`,
+    goal: `Independently review Playbook Candidate ${identity.candidateId}@${identity.candidateVersion} against its current Baseline.`,
+    acceptanceCriteria: [
+      "Return an APPROVED/PASSED structured review outcome for the exact current Playbook Candidate, Baseline, and evaluation set.",
+      "Do not mutate the workspace, protected Playbook policy, or candidate state.",
+    ],
+    contextSlice: {
+      summary: `Review ${identity.candidateId}@${identity.candidateVersion} against ${identity.baseline.id}@${identity.baseline.version} on evaluation set ${identity.evaluationSet.id}@${identity.evaluationSet.version}.`,
+      sourceRefs: appendUniqueStrings(
+        `playbook-candidate:${identity.candidateId}@${identity.candidateVersion}`,
+        `playbook-baseline:${identity.baseline.id}@${identity.baseline.version}`,
+        `evaluation-set:${identity.evaluationSet.id}@${identity.evaluationSet.version}`,
+        ...(mission.playbook.retrospective?.evidenceRefs ?? []),
+      ),
+    },
+    ownershipBoundary: {
+      readPaths: [...PLAYBOOK_REVIEW_READ_PATHS],
+      writePaths: [],
+    },
+    effectivePermission: "read-only",
+    budget: { maxTurns: 4, maxMinutes: 15 },
+    expectedEvidence: [
+      "One structured reviewOutcome Artifact bound to the current Playbook identity.",
+      "At least one Evidence item from the completed review transport output.",
+    ],
+    workKind: "review",
+    risk: "high",
+  };
+}
+
+function assertPlaybookReviewRouting(routing, expectedRouting) {
+  if (
+    !routing ||
+    typeof routing !== "object" ||
+    !routing.assignment ||
+    !routing.agent ||
+    routing.agent.roleId !== "sol_reviewer" ||
+    routing.agent.effectivePermission !== "read-only" ||
+    routing.agent.independent !== true ||
+    routing.assignment.workKind !== "review" ||
+    routing.assignment.risk !== "high" ||
+    routing.assignment.effectivePermission !== "read-only" ||
+    !Array.isArray(routing.assignment.ownershipBoundary?.readPaths) ||
+    routing.assignment.ownershipBoundary.readPaths.length === 0 ||
+    !Array.isArray(routing.assignment.ownershipBoundary?.writePaths) ||
+    routing.assignment.ownershipBoundary.writePaths.length !== 0
+  ) {
+    throw new Error(
+      "Playbook independent review requires a read-only independent Sol Reviewer routing.",
+    );
+  }
+  if (
+    !sameValue(routing.assignment, expectedRouting.assignment) ||
+    !sameValue(routing.agent, expectedRouting.agent)
+  ) {
+    throw new Error(
+      "Playbook independent review routing must match the canonical bounded assignment.",
+    );
+  }
+}
+
+function assertCurrentPlaybookReviewDispatch(mission, identity) {
+  if (
+    mission.status !== "COMPLETED" ||
+    mission.playbook?.status !== "PROMOTION_REQUESTED" ||
+    !mission.allowedActions.includes("record_playbook_independent_review")
+  ) {
+    throw new Error(
+      "Playbook independent review dispatch requires a completed Mission with a current promotion request.",
+    );
+  }
+  if (!sameValue(currentPlaybookIdentity(mission.playbook), identity)) {
+    throw new Error(
+      "Playbook independent review must bind the current Playbook Candidate, Baseline, and evaluation set.",
+    );
+  }
+}
+
+function assertCurrentPlaybookReviewCompletion(mission, dispatch) {
+  if (
+    mission.status !== "COMPLETED" ||
+    mission.playbook?.status !== "REVIEW_IN_PROGRESS" ||
+    mission.playbook.reviewDispatch?.id !== dispatch.id
+  ) {
+    throw new Error(
+      "Playbook independent review completion requires the matching transport review dispatch.",
+    );
+  }
+  if (!sameValue(currentPlaybookIdentity(mission.playbook), {
+    candidateId: dispatch.candidateId,
+    candidateVersion: dispatch.candidateVersion,
+    baseline: dispatch.baseline,
+    evaluationSet: dispatch.evaluationSet,
+  })) {
+    throw new Error(
+      "Playbook independent review completion must bind the dispatched Candidate, Baseline, and evaluation set.",
+    );
+  }
+}
+
+function reviewFromCompletedPlaybookTransport(observation, reviewContext) {
+  if (
+    !observation ||
+    observation.type !== "RUN_COMPLETED" ||
+    !isNonEmptyString(observation.runId) ||
+    !isNonEmptyString(observation.occurredAt)
+  ) {
+    throw new Error("Playbook review requires a completed transport Run.");
+  }
+  const reviewArtifacts = (observation.artifacts ?? []).filter(
+    (artifact) => artifact?.reviewOutcome !== undefined,
+  );
+  if (reviewArtifacts.length !== 1) {
+    throw new Error(
+      "Completed Playbook review requires exactly one structured reviewOutcome Artifact.",
+    );
+  }
+  const artifact = reviewArtifacts[0];
+  const reviewOutcome = artifact.reviewOutcome;
+  const identity = reviewContext?.playbook;
+  if (
+    !reviewOutcome ||
+    typeof reviewOutcome !== "object" ||
+    Array.isArray(reviewOutcome) ||
+    !identity ||
+    typeof identity !== "object"
+  ) {
+    throw new Error("Completed Playbook review has an invalid structured reviewOutcome.");
+  }
+  const outcomeIdentity = {
+    candidateId: reviewOutcome.candidateId,
+    candidateVersion: reviewOutcome.candidateVersion,
+    baseline: reviewOutcome.baseline,
+    evaluationSet: reviewOutcome.evaluationSet,
+  };
+  const currentIdentity = {
+    candidateId: identity.candidateId,
+    candidateVersion: identity.candidateVersion,
+    baseline: identity.baseline,
+    evaluationSet: identity.evaluationSet,
+  };
+  if (!sameValue(outcomeIdentity, currentIdentity)) {
+    throw new Error(
+      "Completed Playbook review must bind the current Playbook Candidate, Baseline, and evaluation set.",
+    );
+  }
+  if (
+    !Array.isArray(reviewOutcome.findings) ||
+    reviewOutcome.findings.some(
+      (finding) => !isNonEmptyString(finding),
+    )
+  ) {
+    throw new Error(
+      "Completed Playbook review requires an explicit findings list.",
+    );
+  }
+  if (!isNonEmptyString(reviewOutcome.rationale)) {
+    throw new Error(
+      "Completed Playbook review requires a reviewer rationale.",
+    );
+  }
+  const evidenceRefs = (observation.evidence ?? []).map((evidence) =>
+    evidence?.ref,
+  );
+  if (
+    evidenceRefs.length === 0 ||
+    evidenceRefs.some((reference) => !isNonEmptyString(reference)) ||
+    new Set(evidenceRefs).size !== evidenceRefs.length
+  ) {
+    throw new Error(
+      "Completed Playbook review requires current Evidence from the same transport output.",
+    );
+  }
+  const artifactRef = artifactReference(artifact);
+  if (!isNonEmptyString(artifactRef)) {
+    throw new Error(
+      "Completed Playbook review requires an identifiable structured review Artifact.",
+    );
+  }
+  const approvedOutcome = ["APPROVED", "PASSED"].includes(
+    reviewOutcome.outcome,
+  );
+  const rejectedOutcome = [
+    "REJECTED",
+    "FAILED",
+    "FIX_FIRST",
+    "CHANGES_REQUESTED",
+  ].includes(reviewOutcome.outcome);
+  const decisionConfirmsApproval =
+    reviewOutcome.decision === undefined ||
+    reviewOutcome.decision === "APPROVED";
+  const decisionRejects = reviewOutcome.decision === "REJECTED";
+  const hasFindings = reviewOutcome.findings.length > 0;
+  const decision =
+    approvedOutcome && decisionConfirmsApproval && !hasFindings
+      ? "APPROVED"
+      : (rejectedOutcome || decisionRejects || hasFindings) && hasFindings
+        ? "REJECTED"
+        : null;
+  if (!decision) {
+    throw new Error(
+      "Completed Playbook review requires a coherent approved or rejected structured reviewOutcome.",
+    );
+  }
+  return {
+    evidenceRefs,
+    review: {
+      decision,
+      reviewer: "sol_reviewer",
+      independent: true,
+      effectivePermission: "read-only",
+      ...clone(outcomeIdentity),
+      findings: clone(reviewOutcome.findings),
+      rationale: reviewOutcome.rationale,
+      transport: {
+        runId: observation.runId,
+        artifactRef,
+        completedAt: observation.occurredAt,
+      },
+    },
+  };
+}
+
+function assertCurrentPlaybookIdentity(playbook, identity, event, label) {
+  if (!playbook?.candidate || !playbook?.baseline) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${label} requires an evaluated Playbook Candidate.`,
+    );
+  }
+  const suppliedIdentity = {
+    candidateId: identity?.candidateId,
+    candidateVersion: identity?.candidateVersion,
+    baseline: identity?.baseline,
+    evaluationSet: identity?.evaluationSet,
+  };
+  if (!sameValue(suppliedIdentity, currentPlaybookIdentity(playbook))) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${label} must bind the current Playbook Candidate, Baseline, and evaluation set.`,
+    );
+  }
+}
+
+function assertCurrentPlaybookApproval(mission, event) {
+  const approval = event.data.approval;
+  if (
+    !approval ||
+    approval.decision !== "APPROVED" ||
+    typeof approval.rationale !== "string" ||
+    approval.rationale.trim() === ""
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: PLAYBOOK_PROMOTED requires an explicit human approval rationale.`,
+    );
+  }
+  if (event.actor !== mission.brief.releaseAuthority) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: PLAYBOOK_PROMOTED requires release authority ${mission.brief.releaseAuthority}.`,
+    );
+  }
+  assertCurrentPlaybookIdentity(mission.playbook, approval.identity, event, "PLAYBOOK_PROMOTED");
+  if (
+    mission.playbook.status !== "REVIEW_APPROVED" ||
+    !sameValue(approval.independentReview, mission.playbook.independentReview) ||
+    !sameValue(event.evidenceRefs, mission.playbook.independentReview.evidenceRefs)
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: PLAYBOOK_PROMOTED requires current independent Sol Reviewer Evidence.`,
+    );
+  }
+}
+
+function projectPlaybookEvent(mission, event) {
+  if (mission.status !== "COMPLETED") {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: ${event.type} is not allowed while Mission is ${mission.status}.`,
+    );
+  }
+
+  if (event.type === "PLAYBOOK_CANDIDATE_EVALUATED") {
+    if (mission.playbook.status !== "NOT_EVALUATED") {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_CANDIDATE_EVALUATED requires no current Playbook Candidate.`,
+      );
+    }
+    assertReplayObject(event.data.candidate, event, "candidate");
+    if (event.data.candidate.retrospective?.missionId !== mission.id) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: Playbook Candidate retrospective must bind the completed Mission ${mission.id}.`,
+      );
+    }
+    mission.playbook = createPlaybookCandidate(event.data.candidate);
+  } else if (event.type === "PLAYBOOK_PROMOTION_REQUESTED") {
+    assertReplayObject(event.data.request, event, "request");
+    assertCurrentPlaybookIdentity(
+      mission.playbook,
+      event.data.request,
+      event,
+      "PLAYBOOK_PROMOTION_REQUESTED",
+    );
+    mission.playbook = requestPlaybookPromotion(mission.playbook, {
+      actor: event.actor,
+      decidedAt: event.occurredAt,
+    });
+  } else if (event.type === "PLAYBOOK_REVIEW_DISPATCHED") {
+    assertReplayObject(event.data.dispatch, event, "dispatch");
+    assertReplayObject(event.data.routing, event, "routing");
+    if (event.actor !== mission.brief.releaseAuthority) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_REVIEW_DISPATCHED requires release authority ${mission.brief.releaseAuthority}.`,
+      );
+    }
+    assertCurrentPlaybookIdentity(
+      mission.playbook,
+      event.data.dispatch,
+      event,
+      "PLAYBOOK_REVIEW_DISPATCHED",
+    );
+    assertPlaybookReviewRouting(
+      event.data.routing,
+      routeAgentAssignment(playbookReviewAssignment(mission)),
+    );
+    mission.playbook = markPlaybookReviewDispatched(
+      mission.playbook,
+      event.data.dispatch,
+    );
+  } else if (event.type === "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED") {
+    assertReplayObject(event.data.review, event, "review");
+    if (event.actor !== "agent:sol_reviewer" || event.evidenceRefs.length === 0) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_INDEPENDENT_REVIEW_RECORDED requires independent Sol Reviewer Evidence and actor.`,
+      );
+    }
+    mission.playbook = recordIndependentPlaybookReview(mission.playbook, {
+      ...clone(event.data.review),
+      actor: event.actor,
+      decidedAt: event.occurredAt,
+      evidenceRefs: clone(event.evidenceRefs),
+    });
+  } else if (event.type === "PLAYBOOK_INDEPENDENT_REVIEW_REJECTED") {
+    assertReplayObject(event.data.review, event, "review");
+    if (event.actor !== "agent:sol_reviewer" || event.evidenceRefs.length === 0) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_INDEPENDENT_REVIEW_REJECTED requires independent Sol Reviewer Evidence and actor.`,
+      );
+    }
+    mission.playbook = recordRejectedPlaybookIndependentReview(
+      mission.playbook,
+      {
+        ...clone(event.data.review),
+        actor: event.actor,
+        decidedAt: event.occurredAt,
+        evidenceRefs: clone(event.evidenceRefs),
+      },
+    );
+  } else if (event.type === "PLAYBOOK_PROMOTED") {
+    assertCurrentPlaybookApproval(mission, event);
+    mission.playbook = promotePlaybookCandidate(mission.playbook, {
+      independentReview: mission.playbook.independentReview,
+      humanDecision: {
+        ...clone(event.data.approval),
+        actor: event.actor,
+        decidedAt: event.occurredAt,
+        evidenceRefs: clone(event.evidenceRefs),
+      },
+    });
+  } else if (event.type === "PLAYBOOK_REJECTED") {
+    const rejection = event.data.rejection;
+    if (
+      !rejection ||
+      rejection.decision !== "REJECTED" ||
+      typeof rejection.rationale !== "string" ||
+      rejection.rationale.trim() === ""
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_REJECTED requires an explicit human rejection rationale.`,
+      );
+    }
+    if (event.actor !== mission.brief.releaseAuthority) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_REJECTED requires release authority ${mission.brief.releaseAuthority}.`,
+      );
+    }
+    assertCurrentPlaybookIdentity(
+      mission.playbook,
+      rejection.identity,
+      event,
+      "PLAYBOOK_REJECTED",
+    );
+    mission.playbook = rejectPlaybookCandidate(mission.playbook, {
+      decision: "REJECTED",
+      actor: event.actor,
+      rationale: rejection.rationale,
+      decidedAt: event.occurredAt,
+    });
+  } else if (event.type === "PLAYBOOK_ROLLED_BACK") {
+    const rollback = event.data.rollback;
+    if (
+      !rollback ||
+      rollback.decision !== "ROLLED_BACK" ||
+      typeof rollback.rationale !== "string" ||
+      rollback.rationale.trim() === ""
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_ROLLED_BACK requires an explicit human rollback rationale.`,
+      );
+    }
+    if (event.actor !== mission.brief.releaseAuthority) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_ROLLED_BACK requires release authority ${mission.brief.releaseAuthority}.`,
+      );
+    }
+    assertCurrentPlaybookIdentity(
+      mission.playbook,
+      rollback.identity,
+      event,
+      "PLAYBOOK_ROLLED_BACK",
+    );
+    if (
+      mission.playbook.status !== "PROMOTED" ||
+      rollback.versionId !== mission.playbook.activePromotedVersionId
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: PLAYBOOK_ROLLED_BACK requires the current active promoted version.`,
+      );
+    }
+    mission.playbook = rollbackPlaybookCandidate(mission.playbook, {
+      decision: "ROLLED_BACK",
+      actor: event.actor,
+      rationale: rollback.rationale,
+      decidedAt: event.occurredAt,
+    });
+  } else {
+    throw new Error(`Cannot replay unknown Playbook event: ${event.type}.`);
+  }
+
+  mission.allowedActions = allowedActionsForMission(mission);
 }
 
 export function getOpenExecutionTransportReservations(mission) {
@@ -1771,6 +2353,7 @@ function projectMission(events, expectedMissionId) {
     approval: null,
     learning: null,
     completion: null,
+    playbook: emptyPlaybookState(),
     events: clone(events),
     allowedActions: [],
   };
@@ -1798,6 +2381,15 @@ function projectMission(events, expectedMissionId) {
         );
       }
       projectExecutionEvent(mission, event);
+      continue;
+    }
+    if (PLAYBOOK_EVENT_TYPES.has(event.type)) {
+      if (event.contextPackVersion !== mission.contextPackVersion) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: Context Pack version does not match.`,
+        );
+      }
+      projectPlaybookEvent(mission, event);
       continue;
     }
     if (CORRECTION_EVENT_TYPES.has(event.type)) {
@@ -2242,6 +2834,50 @@ export function createMissionOrchestrator({
     return getMission(missionId);
   }
 
+  function appendAgentEventsAtomically(missionId, specifications) {
+    if (!Array.isArray(specifications) || specifications.length === 0) {
+      throw new Error("Atomic agent-event append requires at least one event.");
+    }
+    const initialMission = getMission(missionId);
+    let projectedMission = initialMission;
+    const events = [];
+    for (const specification of specifications) {
+      const {
+        type,
+        actor,
+        reason,
+        occurredAt = clock(),
+        evidenceRefs = [],
+        data,
+        assertMission,
+      } = specification;
+      assertAuditMetadata({ actor, reason });
+      assertMission?.(projectedMission);
+      const event = {
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        id: createId("event"),
+        missionId,
+        sequence: initialMission.events.length + events.length + 1,
+        type,
+        actor,
+        occurredAt,
+        reason,
+        contextPackVersion: projectedMission.contextPackVersion,
+        evidenceRefs: clone(evidenceRefs),
+        data: clone(data),
+      };
+      projectedMission = projectMission(
+        [...projectedMission.events, event],
+        missionId,
+      );
+      events.push(event);
+    }
+    eventStore.append(missionId, events, {
+      expectedSequence: initialMission.events.length,
+    });
+    return getMission(missionId);
+  }
+
   function runFromObservation(mission, observation) {
     const existingRun = mission.run;
     if (observation.type === "RUN_STARTED") {
@@ -2286,6 +2922,83 @@ export function createMissionOrchestrator({
       };
     }
     throw new Error(`Unsupported agent observation: ${observation.type}.`);
+  }
+
+  async function consumePlaybookIndependentReview(missionId, prepared) {
+    let activeRunId = null;
+    for await (const observation of agentRouter.run(prepared.routing, {
+      reviewContext: prepared.reviewContext,
+    })) {
+      if (
+        !observation ||
+        typeof observation !== "object" ||
+        !isNonEmptyString(observation.runId)
+      ) {
+        throw new Error("Playbook review transport emitted an invalid observation.");
+      }
+      if (observation.type === "RUN_STARTED") {
+        if (activeRunId) {
+          throw new Error("Playbook review transport started more than one Run.");
+        }
+        activeRunId = observation.runId;
+        continue;
+      }
+      if (!activeRunId || observation.runId !== activeRunId) {
+        throw new Error(
+          "Playbook review transport observation does not match the active Run.",
+        );
+      }
+      if (observation.type === "RUN_UPDATED") {
+        continue;
+      }
+      if (observation.type === "RUN_BLOCKED") {
+        return getMission(missionId);
+      }
+      if (observation.type !== "RUN_COMPLETED") {
+        throw new Error(
+          `Unsupported Playbook review transport observation: ${observation.type}.`,
+        );
+      }
+      const completed = reviewFromCompletedPlaybookTransport(
+        observation,
+        prepared.reviewContext,
+      );
+      completed.review.dispatchId = prepared.dispatch.id;
+      return writeCoordinator.runExclusive(() =>
+        appendAgentEventsAtomically(missionId, [
+          {
+            type: "PLAYBOOK_REVIEW_DISPATCHED",
+            actor: prepared.actor,
+            reason: prepared.reason,
+            occurredAt: prepared.dispatch.dispatchedAt,
+            data: {
+              dispatch: prepared.dispatch,
+              routing: prepared.routing,
+            },
+            assertMission(mission) {
+              assertCurrentPlaybookReviewDispatch(mission, prepared.identity);
+            },
+          },
+          {
+            type:
+              completed.review.decision === "APPROVED"
+                ? "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED"
+                : "PLAYBOOK_INDEPENDENT_REVIEW_REJECTED",
+            actor: "agent:sol_reviewer",
+            reason: observation.summary,
+            occurredAt: observation.occurredAt,
+            evidenceRefs: completed.evidenceRefs,
+            data: { review: completed.review },
+            assertMission(mission) {
+              assertCurrentPlaybookReviewCompletion(mission, prepared.dispatch);
+            },
+          },
+        ]),
+      );
+    }
+    throw new Error(
+      "Playbook review transport ended without a completed or blocked Run outcome.",
+    );
   }
 
   async function consumeAgentRun(missionId, routing) {
@@ -2846,6 +3559,44 @@ export function createMissionOrchestrator({
       }
       return getMission(missionId);
     },
+    async dispatchPlaybookIndependentReview(missionId, input) {
+      if (!agentRouter) {
+        throw new Error("Agent routing is not connected.");
+      }
+      const { actor, reason } = input;
+      assertAuditMetadata({ actor, reason });
+      const prepared = await writeCoordinator.runExclusive(() => {
+        const mission = getMission(missionId);
+        if (actor !== mission.brief.releaseAuthority) {
+          throw new Error(
+            `Playbook independent review dispatch requires release authority ${mission.brief.releaseAuthority}.`,
+          );
+        }
+        assertCurrentPlaybookReviewDispatch(
+          mission,
+          currentPlaybookIdentity(mission.playbook),
+        );
+        const assignment = playbookReviewAssignment(mission);
+        const expectedRouting = routeAgentAssignment(assignment);
+        const routing = agentRouter.route(assignment);
+        assertPlaybookReviewRouting(routing, expectedRouting);
+        assertAssignmentWithinMissionAuthority(mission, routing);
+        const identity = currentPlaybookIdentity(mission.playbook);
+        return {
+          identity,
+          dispatch: {
+            id: createId("playbook-review-dispatch"),
+            ...clone(identity),
+            dispatchedAt: clock(),
+          },
+          actor,
+          reason,
+          routing,
+          reviewContext: playbookReviewContext(mission.playbook),
+        };
+      });
+      return consumePlaybookIndependentReview(missionId, prepared);
+    },
     async dispatchAssignment(missionId, input) {
       if (!agentRouter) {
         throw new Error("Agent routing is not connected.");
@@ -2990,10 +3741,18 @@ export function createMissionOrchestrator({
         } = input;
         const mission = getMission(missionId);
         const command =
-          COMMANDS[type] ?? CORRECTION_COMMANDS[type] ?? EXECUTION_COMMANDS[type];
+          COMMANDS[type] ??
+          CORRECTION_COMMANDS[type] ??
+          EXECUTION_COMMANDS[type] ??
+          PLAYBOOK_COMMANDS[type];
 
         if (!command) {
           throw new Error(`Unknown command: ${type}.`);
+        }
+        if (type === "RECORD_PLAYBOOK_INDEPENDENT_REVIEW") {
+          throw new Error(
+            "RECORD_PLAYBOOK_INDEPENDENT_REVIEW must be dispatched through the transport-backed independent review path.",
+          );
         }
         assertAuditMetadata({ actor, reason });
         if (
@@ -3101,6 +3860,40 @@ export function createMissionOrchestrator({
           throw new Error(`${type} requires current Evidence.`);
         }
         let eventPayload = payload;
+        if (type === "REQUEST_PLAYBOOK_PROMOTION") {
+          eventPayload = {
+            request: currentPlaybookIdentity(mission.playbook),
+          };
+        }
+        if (type === "APPROVE_PLAYBOOK_PROMOTION") {
+          eventPayload = {
+            approval: {
+              decision: "APPROVED",
+              rationale: payload.approval.rationale,
+              identity: currentPlaybookIdentity(mission.playbook),
+              independentReview: clone(mission.playbook.independentReview),
+            },
+          };
+        }
+        if (type === "REJECT_PLAYBOOK_CANDIDATE") {
+          eventPayload = {
+            rejection: {
+              decision: "REJECTED",
+              rationale: payload.rejection.rationale,
+              identity: currentPlaybookIdentity(mission.playbook),
+            },
+          };
+        }
+        if (type === "ROLLBACK_PLAYBOOK_VERSION") {
+          eventPayload = {
+            rollback: {
+              decision: "ROLLED_BACK",
+              rationale: payload.rollback.rationale,
+              identity: currentPlaybookIdentity(mission.playbook),
+              versionId: mission.playbook.activePromotedVersionId,
+            },
+          };
+        }
         if (["APPROVE_RELEASE", "REJECT_RELEASE"].includes(type)) {
           const decision =
             type === "APPROVE_RELEASE" ? "APPROVED" : "REJECTED";

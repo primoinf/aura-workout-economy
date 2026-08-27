@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MISSION_COMMAND_BY_ACTION,
   createLocalStorageEventStore,
   createMemoryEventStore,
   createBrowserWriteCoordinator,
@@ -85,6 +86,188 @@ function advanceToPlanned(orchestrator, missionId) {
     payload: { plan: { steps: ["route one bounded Assignment"] } },
     actor: "mission-owner",
     reason: "Accept the bounded routing plan",
+  });
+}
+
+function createCompletedPlaybookMission(orchestrator) {
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission with observable retrospective outcomes",
+  });
+  const execute = (
+    type,
+    payload,
+    reason,
+    evidenceRefs = [],
+    actor = "mission-owner",
+  ) =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor,
+      reason,
+      evidenceRefs,
+    });
+  const completionCommands = [
+    [
+      "CAPTURE_CONTEXT",
+      { context: { summary: "Capture the completed Mission context" } },
+      "Capture context",
+    ],
+    [
+      "ACCEPT_PLAN",
+      { plan: { steps: ["complete the bounded Mission"] } },
+      "Accept plan",
+    ],
+    [
+      "START_RUN",
+      { run: { id: "run-playbook", agentRole: "terra_builder" } },
+      "Start run",
+    ],
+    [
+      "SUBMIT_ARTIFACT",
+      { artifact: { uri: "artifact://playbook-source" } },
+      "Submit artifact",
+      ["evidence://playbook-artifact"],
+    ],
+    [
+      "PASS_REVIEW",
+      { review: { summary: "Mission review passed" } },
+      "Pass Mission review",
+      ["evidence://playbook-mission-review"],
+    ],
+    [
+      "PASS_VALIDATION",
+      { validation: { summary: "Mission validation passed" } },
+      "Pass Mission validation",
+      ["evidence://playbook-validation"],
+    ],
+    [
+      "CAPTURE_LEARNING",
+      { learning: { summary: "Record observed retry outcome" } },
+      "Capture learning",
+      ["evidence://playbook-learning"],
+    ],
+    [
+      "COMPLETE_NO_RELEASE",
+      { completion: { summary: "Complete the Mission" } },
+      "Complete Mission",
+      ["evidence://playbook-completion"],
+    ],
+  ];
+  let completed;
+  for (const [type, payload, reason, evidenceRefs] of completionCommands) {
+    completed = execute(type, payload, reason, evidenceRefs);
+  }
+  return { created, completed, execute };
+}
+
+function playbookCandidateInputForMission(missionId) {
+  const evaluationSet = {
+    id: "evaluation-set:retry-guidance",
+    version: "2026-08-25",
+    caseIds: ["case:retry-evidence", "case:review-handoff"],
+  };
+  const protectedConfiguration = {
+    systemPrompts: { missionPolicy: "Keep execution bounded and auditable." },
+    agentProfiles: { reviewer: "sol_reviewer" },
+    securityPolicy: { releaseRequiresHumanApproval: true },
+  };
+  const baselineMetrics = {
+    acceptancePassRate: 0.8,
+    criticalRegressions: 0,
+    reviewFindings: 4,
+    retries: 5,
+    cycleTimeMs: 120000,
+    tokenUse: 10000,
+  };
+  return {
+    retrospective: {
+      id: "retrospective:playbook-mission",
+      version: "1",
+      missionId,
+      outcome: "COMPLETED",
+      recurringFailurePattern: "Retry evidence is missing from repeated reviews.",
+      metrics: structuredClone(baselineMetrics),
+      evidenceRefs: ["evidence://playbook-retrospective"],
+    },
+    baseline: {
+      id: "playbook:baseline",
+      version: "1",
+      evaluationSet: structuredClone(evaluationSet),
+      protectedConfiguration: structuredClone(protectedConfiguration),
+      metrics: structuredClone(baselineMetrics),
+      criticalRegressionCaseIds: [],
+    },
+    candidate: {
+      id: "playbook:retry-guidance",
+      version: "2",
+      basedOn: { id: "playbook:baseline", version: "1" },
+      evaluationSet: structuredClone(evaluationSet),
+      protectedConfiguration: structuredClone(protectedConfiguration),
+      change: {
+        summary: "Add a retry-evidence checklist.",
+        scope: "playbook procedure only",
+      },
+      metrics: {
+        acceptancePassRate: 0.9,
+        criticalRegressions: 0,
+        reviewFindings: 2,
+        retries: 3,
+        cycleTimeMs: 100000,
+        tokenUse: 9000,
+      },
+      criticalRegressionCaseIds: [],
+    },
+    declaredTarget: {
+      metric: "acceptancePassRate",
+      minimumImprovement: 0.05,
+    },
+  };
+}
+
+function independentPlaybookReview(candidateInput, overrides = {}) {
+  return {
+    decision: "APPROVED",
+    reviewer: "sol_reviewer",
+    independent: true,
+    effectivePermission: "read-only",
+    candidateId: candidateInput.candidate.id,
+    candidateVersion: candidateInput.candidate.version,
+    baseline: {
+      id: candidateInput.baseline.id,
+      version: candidateInput.baseline.version,
+    },
+    evaluationSet: structuredClone(candidateInput.candidate.evaluationSet),
+    findings: [],
+    rationale: "The comparison has no new critical regression.",
+    ...overrides,
+  };
+}
+
+function createPlaybookReviewHarness(
+  eventStore = createMemoryEventStore(),
+) {
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request);
+      },
+    },
+  });
+  return createHarness(eventStore, agentRouter);
+}
+
+function dispatchPlaybookReview(orchestrator, missionId) {
+  return orchestrator.dispatchPlaybookIndependentReview(missionId, {
+    actor: "mission-owner",
+    reason: "Dispatch the current Playbook Candidate for independent review",
   });
 }
 
@@ -198,6 +381,23 @@ test("mission owner can create a Mission from a valid Brief", () => {
     approval: null,
     learning: null,
     completion: null,
+    playbook: {
+      status: "NOT_EVALUATED",
+      retrospective: null,
+      baseline: null,
+      candidate: null,
+      declaredTarget: null,
+      comparison: null,
+      reviewDispatch: null,
+      independentReview: null,
+      humanDecision: null,
+      promotedVersions: [],
+      rejectionHistory: [],
+      rollbackHistory: [],
+      reviewRejectionHistory: [],
+      decisionHistory: [],
+      activePromotedVersionId: null,
+    },
     events: [
       {
         schemaVersion: 2,
@@ -1244,7 +1444,7 @@ test("no-release Mission completes through every observable lifecycle state", ()
         "COMPLETED",
       ],
       finalStatus: "COMPLETED",
-      allowedActions: [],
+      allowedActions: ["evaluate_playbook_candidate"],
       eventTypes: [
         "MISSION_CREATED",
         "CONTEXT_CAPTURED",
@@ -4316,4 +4516,1023 @@ test("independent reviewer findings return only owned work and its downstream re
       permission: "read-only",
     },
   ]);
+});
+
+test("a completed Mission promotes a reviewed Playbook Candidate without reopening Mission completion", async () => {
+  const orchestrator = createPlaybookReviewHarness();
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission with observable retrospective outcomes",
+  });
+  const execute = (type, payload, reason, evidenceRefs = [], actor = "mission-owner") =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor,
+      reason,
+      evidenceRefs,
+    });
+  const completionCommands = [
+    ["CAPTURE_CONTEXT", { context: { summary: "Capture the completed Mission context" } }, "Capture context"],
+    ["ACCEPT_PLAN", { plan: { steps: ["complete the bounded Mission"] } }, "Accept plan"],
+    ["START_RUN", { run: { id: "run-playbook", agentRole: "terra_builder" } }, "Start run"],
+    ["SUBMIT_ARTIFACT", { artifact: { uri: "artifact://playbook-source" } }, "Submit artifact", ["evidence://playbook-artifact"]],
+    ["PASS_REVIEW", { review: { summary: "Mission review passed" } }, "Pass Mission review", ["evidence://playbook-mission-review"]],
+    ["PASS_VALIDATION", { validation: { summary: "Mission validation passed" } }, "Pass Mission validation", ["evidence://playbook-validation"]],
+    ["CAPTURE_LEARNING", { learning: { summary: "Record observed retry outcome" } }, "Capture learning", ["evidence://playbook-learning"]],
+    ["COMPLETE_NO_RELEASE", { completion: { summary: "Complete the Mission" } }, "Complete Mission", ["evidence://playbook-completion"]],
+  ];
+  let completed;
+  for (const [type, payload, reason, evidenceRefs] of completionCommands) {
+    completed = execute(type, payload, reason, evidenceRefs);
+  }
+
+  const evaluationSet = {
+    id: "evaluation-set:retry-guidance",
+    version: "2026-08-25",
+    caseIds: ["case:retry-evidence", "case:review-handoff"],
+  };
+  const protectedConfiguration = {
+    systemPrompts: { missionPolicy: "Keep execution bounded and auditable." },
+    agentProfiles: { reviewer: "sol_reviewer" },
+    securityPolicy: { releaseRequiresHumanApproval: true },
+  };
+  const baselineMetrics = {
+    acceptancePassRate: 0.8,
+    criticalRegressions: 0,
+    reviewFindings: 4,
+    retries: 5,
+    cycleTimeMs: 120000,
+    tokenUse: 10000,
+  };
+  const candidateInput = {
+    retrospective: {
+      id: "retrospective:playbook-mission",
+      version: "1",
+      missionId: created.id,
+      outcome: "COMPLETED",
+      recurringFailurePattern: "Retry evidence is missing from repeated reviews.",
+      metrics: baselineMetrics,
+      evidenceRefs: ["evidence://playbook-retrospective"],
+    },
+    baseline: {
+      id: "playbook:baseline",
+      version: "1",
+      evaluationSet,
+      protectedConfiguration,
+      metrics: baselineMetrics,
+      criticalRegressionCaseIds: [],
+    },
+    candidate: {
+      id: "playbook:retry-guidance",
+      version: "2",
+      basedOn: { id: "playbook:baseline", version: "1" },
+      evaluationSet,
+      protectedConfiguration,
+      change: {
+        summary: "Add a retry-evidence checklist.",
+        scope: "playbook procedure only",
+      },
+      metrics: {
+        acceptancePassRate: 0.9,
+        criticalRegressions: 0,
+        reviewFindings: 2,
+        retries: 3,
+        cycleTimeMs: 100000,
+        tokenUse: 9000,
+      },
+      criticalRegressionCaseIds: [],
+    },
+    declaredTarget: {
+      metric: "acceptancePassRate",
+      minimumImprovement: 0.05,
+    },
+  };
+
+  const evaluated = execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  const requested = execute(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  const reviewed = await dispatchPlaybookReview(orchestrator, created.id);
+  const promoted = execute(
+    "APPROVE_PLAYBOOK_PROMOTION",
+    {
+      approval: {
+        rationale: "The owner accepts the reviewed improvement target.",
+      },
+    },
+    "Mission owner approves the reviewed Playbook Candidate",
+    ["evidence://playbook-independent-review"],
+  );
+
+  assert.deepEqual(
+    {
+      completedStatus: completed.status,
+      evaluatedStatus: evaluated.status,
+      requestedStatus: requested.status,
+      reviewedStatus: reviewed.status,
+      promotedStatus: promoted.status,
+      playbookStatus: promoted.playbook.status,
+      activeVersion: promoted.playbook.activePromotedVersionId,
+      promotedVersionCount: promoted.playbook.promotedVersions.length,
+      eventTypes: promoted.events.slice(-5).map((event) => event.type),
+    },
+    {
+      completedStatus: "COMPLETED",
+      evaluatedStatus: "COMPLETED",
+      requestedStatus: "COMPLETED",
+      reviewedStatus: "COMPLETED",
+      promotedStatus: "COMPLETED",
+      playbookStatus: "PROMOTED",
+      activeVersion: "playbook:retry-guidance@2",
+      promotedVersionCount: 2,
+      eventTypes: [
+        "PLAYBOOK_CANDIDATE_EVALUATED",
+        "PLAYBOOK_PROMOTION_REQUESTED",
+        "PLAYBOOK_REVIEW_DISPATCHED",
+        "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+        "PLAYBOOK_PROMOTED",
+      ],
+    },
+  );
+});
+
+test("a release-authorized human can reject an evaluated Playbook Candidate without promoting it", () => {
+  const orchestrator = createHarness();
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+
+  execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: playbookCandidateInputForMission(created.id) },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  const rejected = execute(
+    "REJECT_PLAYBOOK_CANDIDATE",
+    {
+      rejection: {
+        rationale: "The owner will retain the current retry guidance this cycle.",
+      },
+    },
+    "Mission owner rejects the evaluated candidate",
+  );
+
+  assert.deepEqual(
+    {
+      status: rejected.status,
+      playbookStatus: rejected.playbook.status,
+      promotedVersions: rejected.playbook.promotedVersions,
+      rejectionHistory: rejected.playbook.rejectionHistory,
+      lastEventType: rejected.events.at(-1).type,
+    },
+    {
+      status: "COMPLETED",
+      playbookStatus: "REJECTED",
+      promotedVersions: [],
+      rejectionHistory: [
+        {
+          candidateId: "playbook:retry-guidance",
+          candidateVersion: "2",
+          decision: "REJECTED",
+          actor: "mission-owner",
+          rationale: "The owner will retain the current retry guidance this cycle.",
+          decidedAt: "2026-07-28T08:00:00.000Z",
+        },
+      ],
+      lastEventType: "PLAYBOOK_REJECTED",
+    },
+  );
+});
+
+test("a release-authorized human can roll back an active promoted Playbook version without rewriting it", async () => {
+  const orchestrator = createPlaybookReviewHarness();
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+  const candidateInput = playbookCandidateInputForMission(created.id);
+
+  execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  execute(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  await dispatchPlaybookReview(orchestrator, created.id);
+  const promoted = execute(
+    "APPROVE_PLAYBOOK_PROMOTION",
+    { approval: { rationale: "The owner approves the reviewed candidate." } },
+    "Mission owner approves the reviewed Playbook Candidate",
+    ["evidence://playbook-independent-review"],
+  );
+  const immutableVersions = structuredClone(promoted.playbook.promotedVersions);
+
+  const rolledBack = execute(
+    "ROLLBACK_PLAYBOOK_VERSION",
+    {
+      rollback: {
+        rationale: "Observed production conditions no longer match the evaluation cases.",
+      },
+    },
+    "Mission owner rolls back the active Playbook version",
+  );
+
+  assert.deepEqual(
+    {
+      status: rolledBack.status,
+      playbookStatus: rolledBack.playbook.status,
+      activeVersion: rolledBack.playbook.activePromotedVersionId,
+      versions: rolledBack.playbook.promotedVersions,
+      rollbackHistory: rolledBack.playbook.rollbackHistory,
+      lastEventType: rolledBack.events.at(-1).type,
+    },
+    {
+      status: "COMPLETED",
+      playbookStatus: "ROLLED_BACK",
+      activeVersion: "playbook:baseline@1",
+      versions: immutableVersions,
+      rollbackHistory: [
+        {
+          versionId: "playbook:retry-guidance@2",
+          fromVersionId: "playbook:retry-guidance@2",
+          toVersionId: "playbook:baseline@1",
+          candidateId: "playbook:retry-guidance",
+          candidateVersion: "2",
+          decision: "ROLLED_BACK",
+          actor: "mission-owner",
+          rationale: "Observed production conditions no longer match the evaluation cases.",
+          decidedAt: "2026-07-28T08:00:00.000Z",
+        },
+      ],
+      lastEventType: "PLAYBOOK_ROLLED_BACK",
+    },
+  );
+});
+
+test("replay rejects a duplicate Playbook promotion request after an independent review", async () => {
+  const orchestrator = createPlaybookReviewHarness();
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+  const candidateInput = playbookCandidateInputForMission(created.id);
+
+  execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  execute(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  const reviewed = await dispatchPlaybookReview(orchestrator, created.id);
+  const forgedRequest = {
+    id: "event-forged-playbook-request",
+    missionId: created.id,
+    sequence: reviewed.events.length + 1,
+    type: "PLAYBOOK_PROMOTION_REQUESTED",
+    actor: "mission-owner",
+    occurredAt: "2026-08-25T10:30:00.000Z",
+    reason: "Forge a second request after review",
+    contextPackVersion: reviewed.contextPackVersion,
+    evidenceRefs: [],
+    data: {
+      request: {
+        candidateId: candidateInput.candidate.id,
+        candidateVersion: candidateInput.candidate.version,
+        baseline: {
+          id: candidateInput.baseline.id,
+          version: candidateInput.baseline.version,
+        },
+        evaluationSet: candidateInput.candidate.evaluationSet,
+      },
+    },
+  };
+  const replay = createHarness(
+    createMemoryEventStore({
+      [created.id]: [...reviewed.events, forgedRequest],
+    }),
+  );
+
+  assert.throws(
+    () => replay.getMission(created.id),
+    /requires an evaluated Playbook Candidate before promotion/,
+  );
+});
+
+test("invalid Playbook commands fail closed without appending a decision event", async () => {
+  assert.equal(
+    MISSION_COMMAND_BY_ACTION.record_playbook_independent_review,
+    undefined,
+  );
+  const invalidOrchestrator = createHarness();
+  const { created: invalidMission, execute: executeInvalid } =
+    createCompletedPlaybookMission(invalidOrchestrator);
+  const mismatchedRetrospective = playbookCandidateInputForMission(
+    "mission-from-unrelated-observations",
+  );
+  const eventsBeforeMismatchedRetrospective = invalidOrchestrator.getMission(
+    invalidMission.id,
+  ).events.length;
+  assert.throws(
+    () =>
+      executeInvalid(
+        "EVALUATE_PLAYBOOK_CANDIDATE",
+        { candidate: mismatchedRetrospective },
+        "Attempt evaluation from another Mission's retrospective",
+      ),
+    /retrospective must bind the completed Mission/,
+  );
+  assert.equal(
+    invalidOrchestrator.getMission(invalidMission.id).events.length,
+    eventsBeforeMismatchedRetrospective,
+  );
+  const criticalRegression = playbookCandidateInputForMission(invalidMission.id);
+  criticalRegression.candidate.metrics.criticalRegressions = 1;
+  criticalRegression.candidate.criticalRegressionCaseIds = [
+    "case:retry-evidence",
+  ];
+  const evaluated = executeInvalid(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: criticalRegression },
+    "Evaluate a candidate with a critical regression",
+  );
+  const eventsBeforeInvalidRequest = evaluated.events.length;
+
+  assert.throws(
+    () =>
+      executeInvalid(
+        "REQUEST_PLAYBOOK_PROMOTION",
+        { request: {} },
+        "Attempt promotion despite a critical regression",
+      ),
+    /new critical regression/,
+  );
+  assert.equal(
+    invalidOrchestrator.getMission(invalidMission.id).events.length,
+    eventsBeforeInvalidRequest,
+  );
+
+  const decisionOrchestrator = createPlaybookReviewHarness();
+  const { created: decisionMission, execute: executeDecision } =
+    createCompletedPlaybookMission(decisionOrchestrator);
+  const candidateInput = playbookCandidateInputForMission(decisionMission.id);
+  executeDecision(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  const requested = executeDecision(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  const eventsBeforeForgedReview = requested.events.length;
+
+  assert.throws(
+    () =>
+      executeDecision(
+        "RECORD_PLAYBOOK_INDEPENDENT_REVIEW",
+        { review: independentPlaybookReview(candidateInput) },
+        "Forge a reviewer decision through the public command boundary",
+        ["evidence://playbook-independent-review"],
+        "agent:sol_reviewer",
+      ),
+    /must be dispatched through the transport-backed independent review path/,
+  );
+  assert.equal(
+    decisionOrchestrator.getMission(decisionMission.id).events.length,
+    eventsBeforeForgedReview,
+  );
+
+  const reviewed = await dispatchPlaybookReview(
+    decisionOrchestrator,
+    decisionMission.id,
+  );
+  const eventsBeforeHumanDecision = reviewed.events.length;
+
+  assert.throws(
+    () =>
+      executeDecision(
+        "APPROVE_PLAYBOOK_PROMOTION",
+        { approval: { rationale: "A forged actor attempts approval." } },
+        "Attempt approval as a non-authority",
+        ["evidence://playbook-independent-review"],
+        "agent:sol_reviewer",
+      ),
+    /requires release authority mission-owner/,
+  );
+  assert.throws(
+    () =>
+      executeDecision(
+        "APPROVE_PLAYBOOK_PROMOTION",
+        { approval: { rationale: "" } },
+        "Attempt approval without a rationale",
+        ["evidence://playbook-independent-review"],
+      ),
+    /requires an explicit human approval rationale/,
+  );
+  assert.equal(
+    decisionOrchestrator.getMission(decisionMission.id).events.length,
+    eventsBeforeHumanDecision,
+  );
+});
+
+test("schema-2 and legacy completed histories replay with a default empty Playbook", () => {
+  const source = createHarness();
+  const { created, completed } = createCompletedPlaybookMission(source);
+  const schema2Store = createMemoryEventStore({
+    [created.id]: completed.events,
+  });
+  const legacyEvents = completed.events.map((event) => {
+    const legacyEvent = structuredClone(event);
+    delete legacyEvent.schemaVersion;
+    return legacyEvent;
+  });
+  const legacyStore = createMemoryEventStore({ [created.id]: legacyEvents });
+
+  const schema2Replay = createHarness(schema2Store).getMission(created.id);
+  const legacyReplay = createHarness(legacyStore).getMission(created.id);
+
+  assert.deepEqual(schema2Replay, completed);
+  assert.deepEqual(
+    {
+      status: legacyReplay.status,
+      playbook: legacyReplay.playbook,
+      eventTypes: legacyReplay.events.map((event) => event.type),
+      storedHistory: legacyStore.load(created.id),
+    },
+    {
+      status: "COMPLETED",
+      playbook: {
+        status: "NOT_EVALUATED",
+        retrospective: null,
+        baseline: null,
+        candidate: null,
+        declaredTarget: null,
+        comparison: null,
+        reviewDispatch: null,
+        independentReview: null,
+        humanDecision: null,
+        promotedVersions: [],
+        rejectionHistory: [],
+        rollbackHistory: [],
+        reviewRejectionHistory: [],
+        decisionHistory: [],
+        activePromotedVersionId: null,
+      },
+      eventTypes: completed.events.map((event) => event.type),
+      storedHistory: legacyEvents,
+    },
+  );
+  assert.deepEqual(schema2Store.load(created.id), completed.events);
+});
+
+test("replay rejects a human rejection after a Playbook version is promoted", async () => {
+  const orchestrator = createPlaybookReviewHarness();
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+  const candidateInput = playbookCandidateInputForMission(created.id);
+
+  execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  execute(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  await dispatchPlaybookReview(orchestrator, created.id);
+  const promoted = execute(
+    "APPROVE_PLAYBOOK_PROMOTION",
+    { approval: { rationale: "The owner approves the reviewed candidate." } },
+    "Mission owner approves the reviewed Playbook Candidate",
+    ["evidence://playbook-independent-review"],
+  );
+  const forgedRejection = {
+    id: "event-forged-playbook-rejection",
+    missionId: created.id,
+    sequence: promoted.events.length + 1,
+    type: "PLAYBOOK_REJECTED",
+    actor: "mission-owner",
+    occurredAt: "2026-08-25T10:40:00.000Z",
+    reason: "Forge a rejection after promotion",
+    contextPackVersion: promoted.contextPackVersion,
+    evidenceRefs: [],
+    data: {
+      rejection: {
+        decision: "REJECTED",
+        rationale: "A promoted version must be rolled back, not rejected.",
+        identity: {
+          candidateId: candidateInput.candidate.id,
+          candidateVersion: candidateInput.candidate.version,
+          baseline: {
+            id: candidateInput.baseline.id,
+            version: candidateInput.baseline.version,
+          },
+          evaluationSet: candidateInput.candidate.evaluationSet,
+        },
+      },
+    },
+  };
+  const replay = createHarness(
+    createMemoryEventStore({
+      [created.id]: [...promoted.events, forgedRejection],
+    }),
+  );
+
+  assert.throws(
+    () => replay.getMission(created.id),
+    /requires an unpromoted candidate/,
+  );
+});
+
+function requestPlaybookTransportReview(orchestrator) {
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+  const candidateInput = playbookCandidateInputForMission(created.id);
+  execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: candidateInput },
+    "Evaluate the bounded Playbook Candidate",
+  );
+  const requested = execute(
+    "REQUEST_PLAYBOOK_PROMOTION",
+    { request: {} },
+    "Request promotion after the comparison passed",
+  );
+  return { created, candidateInput, requested };
+}
+
+function completedPlaybookReviewObservation(request, overrides = {}) {
+  const playbook = request.reviewContext.playbook;
+  const reviewOutcome = {
+    outcome: "PASSED",
+    candidateId: playbook.candidateId,
+    candidateVersion: playbook.candidateVersion,
+    baseline: structuredClone(playbook.baseline),
+    evaluationSet: structuredClone(playbook.evaluationSet),
+    findings: [],
+    rationale: "The completed transport found no new critical regression.",
+    ...overrides.reviewOutcome,
+  };
+  return {
+    kind: "completed",
+    runId: "run-playbook-independent-review",
+    occurredAt: "2026-08-25T11:02:00.000Z",
+    summary: "Completed an independent bounded Playbook review",
+    artifacts: [
+      {
+        name: "playbook-independent-review",
+        uri: "artifact://playbook-independent-review",
+        reviewOutcome,
+        ...overrides.artifact,
+      },
+    ],
+    evidence: [
+      {
+        ref: "evidence://playbook-independent-review",
+        kind: "review",
+        summary: "Independent review of the current Playbook Candidate",
+      },
+    ],
+    ...overrides.observation,
+  };
+}
+
+test("transport-backed Playbook review routes one bounded Sol Reviewer and records its completed Evidence", async () => {
+  const transportRequests = [];
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        transportRequests.push(
+          structuredClone({
+            roleId: request.roleId,
+            permission: request.permission,
+            assignment: request.assignment,
+            reviewContext: request.reviewContext,
+          }),
+        );
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request);
+      },
+    },
+  });
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const { created, requested } = requestPlaybookTransportReview(orchestrator);
+
+  const reviewed = await orchestrator.dispatchPlaybookIndependentReview(
+    created.id,
+    {
+      actor: "mission-owner",
+      reason: "Dispatch the current Playbook Candidate for independent review",
+    },
+  );
+
+  assert.deepEqual(
+    {
+      roleId: transportRequests[0].roleId,
+      permission: transportRequests[0].permission,
+      workKind: transportRequests[0].assignment.workKind,
+      risk: transportRequests[0].assignment.risk,
+      effectivePermission: transportRequests[0].assignment.effectivePermission,
+      readPaths: transportRequests[0].assignment.ownershipBoundary.readPaths,
+      writePaths: transportRequests[0].assignment.ownershipBoundary.writePaths,
+      identity: transportRequests[0].reviewContext.playbook,
+    },
+    {
+      roleId: "sol_reviewer",
+      permission: "read-only",
+      workKind: "review",
+      risk: "high",
+      effectivePermission: "read-only",
+      readPaths: [
+        "src/mission-orchestrator.js",
+        "src/playbook-candidate.js",
+      ],
+      writePaths: [],
+      identity: {
+        candidateId: requested.playbook.candidate.id,
+        candidateVersion: requested.playbook.candidate.version,
+        baseline: {
+          id: requested.playbook.baseline.id,
+          version: requested.playbook.baseline.version,
+        },
+        evaluationSet: requested.playbook.candidate.evaluationSet,
+        comparison: requested.playbook.comparison,
+        retrospective: requested.playbook.retrospective,
+        baselineSnapshot: requested.playbook.baseline,
+        candidateSnapshot: requested.playbook.candidate,
+        declaredTarget: requested.playbook.declaredTarget,
+      },
+    },
+  );
+
+  const reviewEvents = reviewed.events.filter(
+    (event) => event.type === "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+  );
+  assert.deepEqual(
+    {
+      missionStatus: reviewed.status,
+      playbookStatus: reviewed.playbook.status,
+      reviewEvents: reviewEvents.length,
+      actor: reviewEvents[0].actor,
+      evidenceRefs: reviewEvents[0].evidenceRefs,
+      review: reviewEvents[0].data.review,
+    },
+    {
+      missionStatus: "COMPLETED",
+      playbookStatus: "REVIEW_APPROVED",
+      reviewEvents: 1,
+      actor: "agent:sol_reviewer",
+      evidenceRefs: ["evidence://playbook-independent-review"],
+      review: {
+        decision: "APPROVED",
+        reviewer: "sol_reviewer",
+        independent: true,
+        effectivePermission: "read-only",
+        candidateId: requested.playbook.candidate.id,
+        candidateVersion: requested.playbook.candidate.version,
+        baseline: {
+          id: requested.playbook.baseline.id,
+          version: requested.playbook.baseline.version,
+        },
+        evaluationSet: requested.playbook.candidate.evaluationSet,
+        findings: [],
+        rationale: "The completed transport found no new critical regression.",
+        dispatchId: reviewed.playbook.reviewDispatch.id,
+        transport: {
+          runId: "run-playbook-independent-review",
+          artifactRef: "artifact://playbook-independent-review",
+          completedAt: "2026-08-25T11:02:00.000Z",
+        },
+      },
+    },
+  );
+  assert.deepEqual(
+    createHarness(eventStore).getMission(created.id).playbook.independentReview,
+    reviewed.playbook.independentReview,
+  );
+});
+
+test("replay rejects an approved Playbook review without a matching transport dispatch", () => {
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createHarness(eventStore);
+  const { created, candidateInput, requested } =
+    requestPlaybookTransportReview(orchestrator);
+  const forgedReview = {
+    id: "event-forged-playbook-review",
+    missionId: created.id,
+    sequence: requested.events.length + 1,
+    type: "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+    actor: "agent:sol_reviewer",
+    occurredAt: "2026-08-25T11:02:00.000Z",
+    reason: "Forge an approval without a transport dispatch",
+    contextPackVersion: requested.contextPackVersion,
+    evidenceRefs: ["evidence://forged-playbook-review"],
+    data: {
+      review: {
+        ...independentPlaybookReview(candidateInput),
+        transport: {
+          runId: "run-forged",
+          artifactRef: "artifact://forged-playbook-review",
+          completedAt: "2026-08-25T11:02:00.000Z",
+        },
+      },
+    },
+  };
+  const replay = createHarness(
+    createMemoryEventStore({
+      [created.id]: [...requested.events, forgedReview],
+    }),
+  );
+
+  assert.throws(
+    () => replay.getMission(created.id),
+    /active transport review dispatch/,
+  );
+});
+
+test("a negative transport review is durable and blocks review retry for the unchanged Candidate", async () => {
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-negative-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          reviewOutcome: {
+            outcome: "FAILED",
+            decision: "REJECTED",
+            findings: ["The retry checklist omits the rollback Evidence case."],
+            rationale: "The current Candidate must not be promoted unchanged.",
+          },
+          observation: {
+            runId: "run-playbook-negative-review",
+          },
+        });
+      },
+    },
+  });
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const { created } = requestPlaybookTransportReview(orchestrator);
+
+  const rejected = await dispatchPlaybookReview(orchestrator, created.id);
+
+  assert.equal(rejected.playbook.status, "REVIEW_REJECTED");
+  assert.deepEqual(rejected.playbook.independentReview.findings, [
+    "The retry checklist omits the rollback Evidence case.",
+  ]);
+  assert.deepEqual(rejected.playbook.independentReview.evidenceRefs, [
+    "evidence://playbook-independent-review",
+  ]);
+  assert.deepEqual(rejected.events.slice(-2).map((event) => event.type), [
+    "PLAYBOOK_REVIEW_DISPATCHED",
+    "PLAYBOOK_INDEPENDENT_REVIEW_REJECTED",
+  ]);
+  await assert.rejects(
+    dispatchPlaybookReview(orchestrator, created.id),
+    /current promotion request/,
+  );
+  assert.equal(
+    createHarness(eventStore).getMission(created.id).playbook.status,
+    "REVIEW_REJECTED",
+  );
+});
+
+test("review dispatch and decision persist atomically when the event store rejects the batch", async () => {
+  const backingStore = createMemoryEventStore();
+  const faultingStore = {
+    append(missionId, events, options) {
+      if (
+        events.some((event) =>
+          [
+            "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+            "PLAYBOOK_INDEPENDENT_REVIEW_REJECTED",
+          ].includes(event.type),
+        )
+      ) {
+        throw new Error("Simulated atomic review batch failure");
+      }
+      backingStore.append(missionId, events, options);
+    },
+    load: (...args) => backingStore.load(...args),
+    listMissionIds: (...args) => backingStore.listMissionIds(...args),
+    subscribe: (...args) => backingStore.subscribe(...args),
+  };
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-atomic-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          observation: { runId: "run-playbook-atomic-review" },
+        });
+      },
+    },
+  });
+  const orchestrator = createHarness(faultingStore, agentRouter);
+  const { created, requested } = requestPlaybookTransportReview(orchestrator);
+
+  await assert.rejects(
+    dispatchPlaybookReview(orchestrator, created.id),
+    /Simulated atomic review batch failure/,
+  );
+
+  const replayed = createHarness(backingStore).getMission(created.id);
+  assert.equal(replayed.playbook.status, "PROMOTION_REQUESTED");
+  assert.equal(replayed.events.length, requested.events.length);
+  assert.equal(
+    replayed.events.some((event) => event.type === "PLAYBOOK_REVIEW_DISPATCHED"),
+    false,
+  );
+});
+
+test("transport-backed Playbook review fails closed for bad routing and terminal output", async () => {
+  const scenarios = [
+    {
+      name: "wrong-role routing",
+      expectedError: /requires a read-only independent Sol Reviewer/,
+      router({ adapter }) {
+        return {
+          route(assignment) {
+            const routing = adapter.route(assignment);
+            return {
+              ...routing,
+              agent: {
+                ...routing.agent,
+                roleId: "terra_builder",
+                roleName: "Terra Builder",
+                capability: "implementation",
+                independent: undefined,
+              },
+            };
+          },
+          run(...args) {
+            return adapter.run(...args);
+          },
+        };
+      },
+    },
+    {
+      name: "blocked transport",
+      transport: async function* run() {
+        yield {
+          kind: "started",
+          runId: "run-blocked-playbook-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield {
+          kind: "blocked",
+          runId: "run-blocked-playbook-review",
+          occurredAt: "2026-08-25T11:01:00.000Z",
+          blocker: "The reviewer cannot inspect a missing Evidence source.",
+          attemptedAlternatives: ["Checked the bounded Playbook context"],
+          requiredAuthorityOrInput: "Provide the missing retrospective Evidence",
+        };
+      },
+    },
+    {
+      name: "transport error",
+      expectedError: /review transport is unavailable/,
+      transport: async function* run() {
+        throw new Error("Playbook review transport is unavailable");
+      },
+    },
+    {
+      name: "missing Evidence",
+      expectedError: /Completed Run requires at least one structured Evidence item/,
+      transport: async function* run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        const observation = completedPlaybookReviewObservation(request);
+        observation.evidence = [];
+        yield observation;
+      },
+    },
+    {
+      name: "missing structured review outcome",
+      expectedError: /requires exactly one structured reviewOutcome Artifact/,
+      transport: async function* run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          artifact: { reviewOutcome: undefined },
+        });
+      },
+    },
+    {
+      name: "stale candidate identity",
+      expectedError:
+        /must bind the current Playbook Candidate, Baseline, and evaluation set/,
+      transport: async function* run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          reviewOutcome: { candidateVersion: "stale-version" },
+        });
+      },
+    },
+    {
+      name: "conflicting approved outcome",
+      expectedError: /requires a coherent approved or rejected structured reviewOutcome/,
+      transport: async function* run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          reviewOutcome: { decision: "REJECTED" },
+        });
+      },
+    },
+    {
+      name: "decision without transport outcome",
+      expectedError: /requires a coherent approved or rejected structured reviewOutcome/,
+      transport: async function* run(request) {
+        yield {
+          kind: "started",
+          runId: "run-playbook-independent-review",
+          occurredAt: "2026-08-25T11:00:00.000Z",
+        };
+        yield completedPlaybookReviewObservation(request, {
+          reviewOutcome: { outcome: undefined, decision: "APPROVED" },
+        });
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const adapter = createAgentRoutingAdapter({
+      transport: {
+        run:
+          scenario.transport ??
+          (async function* run() {
+            throw new Error("Wrong-role routing must not start transport");
+          }),
+      },
+    });
+    const agentRouter = scenario.router ? scenario.router({ adapter }) : adapter;
+    const eventStore = createMemoryEventStore();
+    const orchestrator = createHarness(eventStore, agentRouter);
+    const { created, requested } = requestPlaybookTransportReview(orchestrator);
+    const eventsBefore = requested.events.length;
+
+    const dispatch = orchestrator.dispatchPlaybookIndependentReview(created.id, {
+      actor: "mission-owner",
+      reason: `Attempt transport-backed review with ${scenario.name}`,
+    });
+    if (scenario.expectedError) {
+      await assert.rejects(dispatch, scenario.expectedError, scenario.name);
+    } else {
+      const result = await dispatch;
+      assert.equal(result.playbook.status, "PROMOTION_REQUESTED", scenario.name);
+    }
+
+    const replayed = createHarness(eventStore).getMission(created.id);
+    assert.equal(
+      replayed.events.length,
+      eventsBefore,
+      `${scenario.name} must not append an independent-review decision`,
+    );
+    assert.equal(
+      replayed.playbook.status,
+      "PROMOTION_REQUESTED",
+      `${scenario.name} must leave the candidate awaiting independent review`,
+    );
+    assert.equal(
+      replayed.events.filter(
+        (event) => event.type === "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+      ).length,
+      0,
+      `${scenario.name} must not append the review event`,
+    );
+  }
 });

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "mission-control-ticket-06-candidate-v1",
+  "base": "baac8ddc340198cf445013d5234b2c0924f98e80",
+  "recipe": "SHA-256 each listed working-tree file as bytes; sort by the explicit path order below; hash UTF-8 lines '<path> <sha256>\\n' for the aggregate",
+  "records": [
+    { "path": "codex-mission-control/src/main.js", "sha256": "39db3f806a37debeb12c424e4dd9b4c311379717fa7e4b4dde127fc9f170149e" },
+    { "path": "codex-mission-control/src/mission-orchestrator.js", "sha256": "b994d14071ef6726f6bde478bc4b84496100340d772b9a4eb87d1e78fe67e27d" },
+    { "path": "codex-mission-control/src/styles.css", "sha256": "0487c76f55311ed3697f60a587292e349aea69005a34c604650953151e02669c" },
+    { "path": "codex-mission-control/src/playbook-candidate.js", "sha256": "54a52ee7b2f9b04bc2c12c7a4cf29630c6fc1c5664481878d98054b9bdb52101" },
+    { "path": "codex-mission-control/src/playbook-room-view.js", "sha256": "d73b5e8fb383009ba2613db28140a6abd0970459cae1aa6d03169cfef0587aa0" },
+    { "path": "codex-mission-control/tests/mission-orchestrator.test.js", "sha256": "61298f47e48fe9593c7b29241e382f4bce53be9d55610e4cc229c9b794b76790" },
+    { "path": "codex-mission-control/tests/playbook-candidate.test.js", "sha256": "6f3e5330aa36c3109eba01686368fe0ed3eccba814bab899f9d19e54e3acfd04" },
+    { "path": "codex-mission-control/tests/playbook-room-view.test.js", "sha256": "56547240429edceb253106bd39edbf2a1aa29a1481a866ea04f9c25d9c3dd4f4" },
+    { "path": "tickets.md", "scope": "Ticket 06 section plus frozen concurrent hunks", "sha256": "60358d1b361060f6e9b80c55ef012376b4f6123cdbcf89e81b0e52a8abe4578c" },
+    { "path": "hotcache.md", "scope": "Required Ticket 06 recent-context deliverable", "sha256": "f9a340664e0daedb0df7006ee8d74802c39e5518fc29165bccb7421d6ef094f1" },
+    { "path": "task-board.md", "scope": "Required TASK-047 completion deliverable plus frozen concurrent rows", "sha256": "443c7067ba5237f90ad3e764fc7b8134f88b4ffafff20257b9399f6a138ec8db" },
+    { "path": "work log.md", "scope": "Required Ticket 06 work-log entry plus frozen prior history", "sha256": "e7dbae2826205547c727a5710990771988fcde44ee25066469e6bb31087ce51a" }
+  ],
+  "aggregateSha256": "da024ca365cc9ec0afead6aa2d9025f229aa9dd3a790c226bd2deaaec0dec04f"
+}

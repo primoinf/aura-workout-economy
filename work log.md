@@ -2,6 +2,136 @@
 
 Timezone: Asia/Bangkok (`+07:00`)
 
+## 2026-08-28 02:39:32 +07:00
+
+- Received explicit owner authorization to create the scoped Tickets 06-07 checkpoint commit. Reconfirmed the reviewed behavior hashes are unchanged and kept the authorization limited to the exact 36 paths and commit message `feat: complete mission control playbook and operations UI`.
+- Closed TASK-049 after the prior scoped whitespace, secret, JSON/JSONL, hash/reference, terminal-state, and Luna runtime checks passed. Existing 169/169 Node, syntax, production-copy, Vite build, and desktop/mobile browser receipts remain applicable because no behavior input changed.
+- The authorization does not include push, merge, release, deployment, production mutation, or unrelated workspace files.
+
+## 2026-08-28 02:05:10 +07:00
+
+- Completed the read-only TASK-049 checkpoint audit. The proposed Tickets 06-07 commit scope contains exactly 36 paths: 16 Mission Control source/tests, 9 tracked prototype deletions, 4 tracker/spec files, and all 7 Ticket 06 assurance receipts. Explicitly excluded 55 unrelated nonignored paths plus ignored dependency/build/log roots; no ambiguous path remains.
+- Verified scoped tracked and untracked whitespace, secret-pattern scan, JSON/JSONL parsing, parent-recovery hash bindings, candidate aggregate, absent reviewer lock, and terminal Ticket 06 state. Ticket 06 remains `parent-completed`, `review-exhausted`, 3/3 calls, and `final-strict-not-achieved`; historical candidate/readiness hashes were preserved rather than regenerated.
+- Both read-only Luna lanes passed the required `gpt-5.6-luna` / `max` runtime gate. Existing 169/169 Node, syntax, production-copy, Vite build, and desktop/mobile browser evidence was reused because every behavior source/test predates that receipt and only tracker files changed afterward. No staging, commit, push, merge, release, or deployment was performed; explicit owner commit authorization is pending.
+
+## 2026-08-28 01:55:03 +07:00
+
+- Resumed TASK-049 and moved it to DOING. The checkpoint-preparation boundary remains Tickets 06-07 from base `baac8dd`, including source/tests, tracked prototype deletions, tracker records, and Ticket 06 assurance receipts while excluding unrelated agent/config, graph/build output, Nihongo Dojo, and other workstreams.
+- Selected Solweaver team execution with standard assurance and two bounded read-only Luna lanes: exact Git scope inventory and Ticket 06 assurance-receipt consistency. `TDD_REQUIRED: no` because this task changes no product behavior.
+- No staging, commit, push, merge, release, deployment, or production mutation was performed; explicit owner authorization remains required before committing.
+
+## 2026-08-27 21:42:59 +07:00
+
+- Paused after completing the seven-ticket Mission Control delivery track and queued TASK-049 for the next session: prepare a scoped checkpoint for uncommitted Ticket 06-07 work.
+- Recorded a machine-readable and human-readable handoff in `.planning/HANDOFF.json` and `.planning/.continue-here.md`. The plan starts by binding the exact tracked, deleted, and untracked in-scope files, excluding unrelated dirty/generated work, inspecting the cumulative diff and Ticket 06 terminal assurance receipts, and refreshing validation only if the candidate or evidence changed.
+- Confirmed `main` remains at `baac8ddc340198cf445013d5234b2c0924f98e80` and ports 4175/4185 have no listeners. Planning/handoff work changed no production code. No commit, push, merge, release, or deployment was performed; explicit authorization remains required before committing.
+
+## 2026-08-27 21:31:31 +07:00
+
+- Completed Mission Control Ticket 07. Added URL-restored Mission/agent/lifecycle/risk/time filters, event/Evidence-bound operational aggregates for capacity, queue, gates, cycle time, token use, retries, ownership conflicts, and approval demand, plus coherent Mission Detail, Runs & Artifacts, Decision Rooms, Quality Gates, Approval Room, Playbooks, Metrics, and Settings navigation.
+- Added dedicated production audit views and responsive/accessibility styling with semantic labelled native controls, visible focus, reduced-motion support, mobile horizontal navigation, honest unavailable telemetry, and local-only authority boundaries. Removed the tracked throwaway terminal and UI prototype shells after their decisions/tests were absorbed; they remain recoverable from Git history.
+- TDD RED→GREEN covered URL state, filter selection, provenance, semantic navigation, and each audit view. Parent review caught and fixed mismatched lifecycle filter names (`BRIEF_ACCEPTED`/`IN_REVIEW`) before the final candidate.
+- Validation passed: 169/169 full Node tests, JavaScript syntax, scoped diff/whitespace checks, production-copy search, and Vite production build. Browser QA at 1440×960 and 390×844 verified visual layout, no overflow, mobile nav scrolling, filter reload, create/inspect, every audit route, block/resume, reduced motion, and clean console. The Browser surface did not advance Tab focus and its native cancel confirm timed out; deterministic cancel/replay contracts passed. No commit, push, release, or deployment.
+
+## 2026-08-27 21:05:40 +07:00
+
+- Resumed the Mission Control track after Ticket 06 and opened TASK-048 for Ticket 07, the remaining ready frontier item: production-quality Mission operations, audit navigation, URL-restored filters, traceable aggregates, accessibility, and representative desktop/mobile journeys.
+- Selected Solweaver auto/local execution with standard assurance; parent model/effort runtime metadata is unavailable and remains unverified. TDD is required, with URL-backed dashboard view state as the first observable seam.
+- No production code, deployment, commit, push, release, or external system was changed in this checkpoint.
+
+## 2026-08-27 04:37:48 +07:00
+
+- Closed the third and final independent-review findings for Mission Control Ticket 06 in parent recovery. Candidate retrospective replay now binds to the actual completed Mission, and review dispatch plus approval/rejection persist as one projected atomic event-store batch so a failed append cannot strand `REVIEW_IN_PROGRESS`.
+- Corrected assurance coordination to name one canonical absolute main-checkout lock across worktrees and reconciled the review packet with all twelve candidate-manifest records. No additional reviewer call was made: the terminal assurance state is `parent-completed` / `final-strict-not-achieved`, with no known product blocker.
+- TDD RED reproduced both behavior gaps; targeted GREEN passed 2/2, focused Ticket 06 passed 103/103, full Node tests passed 157/157, and the Vite production build passed. Unrelated workspace changes were preserved; no commit, push, release, or deployment was performed.
+
+## 2026-08-27 04:06:27 +07:00
+
+- Completed Mission Control Ticket 06 from the existing dirty working tree. Added bounded retrospective-backed Candidate evaluation against a versioned Baseline on identical cases, all six metrics, declared-target and case-level critical-regression gates, protected-policy equality, immutable Baseline/Candidate versions, explicit human promotion/rejection, and rollback to the previous version.
+- Added transport-bound read-only Sol Reviewer dispatch with full Candidate/gate context, replay-required dispatch provenance, durable negative findings/Evidence, and unchanged-candidate retry blocking. Playbook Room actions now use the Mission's declared release authority instead of a hardcoded owner.
+- TDD closure covered promotion, rejection, critical/inferior blocking, stale Baselines/evaluation sets, rollback, identity collisions, forged review commands/replay, durable negative review, and non-default target projection. Focused integrated Ticket 06 checks passed 102/102; final full-suite/build and final-strict receipts are maintained in `.scratch/mission-control-ticket-06/`.
+- Updated Ticket 06, task board, hot cache, and this log. Preserved unrelated workspace changes; no commit, push, release, or deployment was performed.
+
+## 2026-08-24 18:54:03 +07:00
+
+- Removed the legacy project-level `.codex/agents/luna_worker.toml` after runtime evidence showed it routed Luna work to the parent Sol model instead of `gpt-5.6-luna/max`.
+- Confirmed the override path is absent and ran Solweaver's installed-copy validator successfully. The existing global warning about the missing example spawned-thread cap of 2 remains.
+- No application code, deployment, commit, or external system was changed. A fresh Codex task is required for the definitive Luna runtime smoke because agent routing may be cached per task.
+
+## 2026-08-24 18:46:34 +07:00
+
+- Installed Solweaver `v0.9.0` / `1965649` from an LF checkout into `C:\Users\HYPERX\.agents\skills`, with Terra/Luna/reviewer definitions in `C:\Users\HYPERX\.codex\agents`.
+- Copied the package `examples/AGENTS.md` into the previously empty global Codex `AGENTS.md`; SHA-256 matched the source. Global config was not overwritten and still defaults to Luna, while the user selected Sol for the current task.
+- Installed-copy static validation passed. It warned that the global Sol default and example concurrency cap are absent; runtime behavior still requires restart/new-task smoke testing. Temporary source clone was removed.
+
+## 2026-08-24 18:34:06 +07:00
+
+- Reviewed external `jay7793/solweaver` at `v0.9.0` / commit `1965649`; no repository source was changed.
+- Confirmed strong role/ownership and assurance design, then found Windows validation failures from CRLF hashes and `shlex.join` path quoting, a readiness validator that only hash-binds arbitrary evidence and permits unproven legacy budgets, symlink resolution before manifest checks, and optional child/worktree runtime binding.
+- Validation: `compileall` passed; non-installer validation helpers and an LF checkout's installed-copy validation passed. Default Windows checkout `validate_install.py` and full `scripts/validate.py` failed with the recorded gaps. Temporary review clone removed; no deployment or external mutation.
+
+## 2026-08-17 16:40:43 +07:00
+
+- Completed the independent Mission Control Ticket 05 review from the current tree. Fixed incomplete block records, coordinated capacity with no worker slot, missing durable wave reservation metadata, forged reviewer candidate closure data, and restart-time orphan transport reservations.
+- Added explicit owner-authorized transport recovery and regression coverage in `codex-mission-control/src/mission-orchestrator.js`, `src/task-graph-execution.js`, `src/main.js`, and the three Mission Control test files.
+- Validation passed: focused 11/11, full 103/103 Node tests, JavaScript syntax checks, Vite production build, and staged/scoped `git diff --check`. Live Browser/Chrome/Playwright control was unavailable; prior visual/control/console checks remain recorded and full keyboard Tab traversal is the unavoidable gap.
+- Created scoped commit `baac8dd` containing only the six Ticket 05 Mission Control source/test files. Updated `task-board.md` and `hotcache.md`; no deployment or unrelated changes.
+
+## 2026-08-14 02:30:29 +07:00
+
+- Rechecked Mission Control Ticket 05 from the current working tree. `npm.cmd test` passed 98/98, `npm.cmd run build` passed, and scoped `git diff --check` passed with only LF/CRLF warnings; direct `npm` invocation was blocked by PowerShell execution policy.
+- Built a graphify snapshot for `codex-mission-control/` (449 nodes, 1,018 extracted edges, 15 communities) to confirm the implementation seam and related test coverage.
+- Ticket 05 remains `DOING`: desktop/mobile browser and accessibility/focus/overflow/console QA, independent correctness/security review, any fixes, tracker closure, and a scoped commit remain.
+
+## 2026-08-14 03:01:46 +07:00
+
+- Completed Ticket 05 browser QA on desktop and mobile: visual layout, overflow, control names, Decision Room/Mission Flow journey, and browser console passed. The Browser surface did not advance focus on Tab, so full keyboard tab-order verification remains a tooling gap.
+- Manual independent trace reproduced and fixed acceptance of duplicate/undeclared Decision Room participant roles; added a regression test. Validation passed with 99/99 Node tests, JavaScript syntax checks, Vite production build, and scoped diff checks.
+- Updated Ticket 05 acceptance/tracker state and committed only the scoped Mission Control files as `6f87dd1`. No deployment; unrelated workspace changes were preserved.
+
+## 2026-08-12 00:18:54 +07:00
+
+- Recovered the current Mission Control Ticket 05 state from the working tree and tracker. The implementation now spans dependency-aware Task Graph execution, bounded waves and reserved Orchestrator capacity, ownership-conflict serialization, deterministic role routing, observable agent/activity presentation, structured Decision Rooms, and targeted reviewer correction.
+- Read-only validation passed: 82/82 Node tests, JavaScript syntax checks, Vite production build, and scoped `git diff --check`.
+- Ticket 05 remains `DOING` pending desktop/mobile browser and accessibility/focus/overflow/console QA, independent correctness/security review, any resulting fixes, acceptance-check updates, and a scoped commit. No deployment occurred; unrelated workspace changes remain preserved.
+
+## 2026-08-06 04:05:29 +07:00
+
+- Installed `mattpocock/skills` with `npx skills@latest add mattpocock/skills`.
+- The installer discovered and copied all 35 skills into `.agents/skills`, overwriting matching existing copies, and refreshed `skills-lock.json` hashes/entries.
+- Validation: installer completed successfully; 48 skill directories are present under `.agents/skills`. No application code or deployment changed.
+
+## 2026-08-05 00:16:57 +07:00
+
+- Closed the Mission Control Approval Room verification debt: release validation now fails closed for missing, reference-only, or metadata-only Artifact detail; failed gate outcomes (including nested details) and reused release Evidence refs; and empty candidate sets.
+- Added the shared Artifact inspection seam, exact diff/patch/content rendering, Evidence source/details rendering, keyboard-focusable detail blocks, rejected-candidate Approval Room history, and pure render/command regression tests. Approval still performs no external action.
+- Validation passed: 63/63 Node tests, JavaScript syntax checks, Vite production build, scoped `git diff --check`, and final Standards/Spec re-review with no hard blocker. Browser/DOM visual/accessibility QA remains unavailable because the Browser tool explicitly prohibited the local URL.
+- Changed only the scoped Mission Control implementation/tests and committed them as `04c6ba7`; preserved unrelated agent/config, docs, generated output, task files, and Nihongo Dojo changes. No deployment occurred.
+
+## 2026-08-04 23:14:24 +07:00
+
+- Revalidated Codex Mission Control Ticket 02–03: 54/54 Node tests, JavaScript syntax checks, Vite production build, and scoped `git diff --check` passed.
+- Ran independent Standards/Spec review. No hard standards violation or domain-lifecycle bypass was found. Follow-up verification debt remains for end-to-end Approval Room DOM journeys, desktop/mobile accessibility QA, and rendering exact diff/content details instead of opaque Artifact/Evidence refs.
+- Staged and committed only the six Mission Control source/test files as `7052e12` (`feat: complete mission release readiness controls`). Preserved unrelated agent/config, docs, generated output, and Nihongo Dojo changes; no deployment occurred.
+
+## 2026-07-30 20:28:27 +07:00
+
+- Completed Codex Mission Control Ticket 03: release-required Missions now require explicit machine-readable authorization, a declared human authority, residual risk, intended external action, and rollback commitment.
+- Added `APPROVAL_REQUIRED` and `READY_TO_RELEASE`, exact current Gate Evidence checks, complete multi-Artifact candidate snapshots, human approve/reject events, typed rejection correction, Context invalidation, and fail-closed authority/missing/duplicate/malformed/out-of-order/stale replay behavior.
+- Built the production Review Ledger Approval Room with current Artifact set, Evidence, risk, external action, rollback, authority, decision controls, and immutable decision history. Approval changes state only; it never commits, pushes, opens a PR, releases, deploys, or sends an external message.
+- TDD and final Standards/Spec review covered unauthorized Briefs, wrong actors, repeated correction, multi-Artifact connected Runs, stale approval, Context revision, audit rationale, no external side effect, and centralized route eligibility. Both reviewers reported no remaining actionable finding.
+- Validation passed: 54/54 Node tests, JavaScript syntax checks, Vite production build, and scoped `git diff --check`. Browser desktop/mobile visual, focus, overflow, console, and rendered accessibility QA remained unavailable because the Browser tool explicitly prohibited the local URL.
+- Changed the Mission Orchestrator, presenter, browser UI, styles, both Mission test files, tickets, task board, cache, and this log. Git staging/commit remains blocked by the active Codex usage quota; no deployment was performed and unrelated workspace changes were preserved.
+
+## 2026-07-30 19:59:34 +07:00
+
+- Completed Codex Mission Control Ticket 02: review and validation failures preserve distinct `CHANGES_REQUESTED` provenance, corrections redispatch through the existing assigned agent role, Context revision invalidates dependent state, blocking resumes only through the prior safe state, and cancellation is terminal with readable history.
+- Added fail-closed freshness enforcement for commands, connected agent completions, and forged-history replay. Every prior Artifact plus artifact, review, validation, and approval Evidence references are invalidated; regression coverage rejects both a stale secondary Artifact and stale Evidence. In-flight blocked Runs become explicitly interrupted and expose a recovery action.
+- Expanded Command Deck and Mission Flow presentation, controls, banners, actions, metrics, and visual states for changes-requested, blocked, resumed, and cancelled work.
+- TDD and final two-axis review covered repeated corrections, stale multi-Artifact/Evidence, illegal bypass, context revision, block/resume races, cancellation, connected correction dispatch, and centralized presenter state derivation. Validation passed: 45/45 Node tests, JavaScript syntax checks, Vite production build, and `git diff --check` on the scoped files; both reviewers reported no remaining actionable finding.
+- Browser desktop/mobile visual QA was unavailable because the Browser tool explicitly prohibited the local URL, so rendered focus, overflow, console behavior, and visual distinction remain a recorded validation gap. Git staging/commit was blocked before execution by the Codex usage quota; the validated changes remain uncommitted. No deployment was performed.
+- Changed `codex-mission-control/src/main.js`, `mission-orchestrator.js`, `mission-presenter.js`, `styles.css`, both Mission test files, `tickets.md`, `task-board.md`, `hotcache.md`, and this log. Unrelated workspace changes were preserved.
+
 ## 2026-07-30 16:07:17 +07:00
 
 - Completed Codex Mission Control Ticket 04: bounded Assignments now route through a transport-neutral adapter to the smallest capable configured role, with permission and ownership constrained by the Mission Brief.
@@ -373,3 +503,15 @@ Timezone: Asia/Bangkok (`+07:00`)
 - ตรวจพบ Codex project agents ครบ 5 ตัวใน `.codex/agents/` และค่าตรงกับนโยบาย routing ใน `AGENTS.md`
 - สร้าง `hotcache.md`; ตรวจแล้วมี 96 คำ ซึ่งต่ำกว่าขีดจำกัด 500 คำ
 - เวลาที่ทำสองรายการย้อนหลังไม่ได้ถูกบันทึกไว้ จึงรวมไว้ใต้ timestamp เวลาที่สร้าง Work Log นี้แทนการสมมติเวลา
+## 2026-08-25 05:32:50 +07:00 — Started Mission Control Ticket 06
+
+- Outcome: Established a Solweaver team plan; Luna completed the read-only integration/acceptance map and Terra delivered the first TDD core checkpoint.
+- Files changed: `task-board.md`, `hotcache.md`, `codex-mission-control/src/playbook-candidate.js`, `codex-mission-control/tests/playbook-candidate.test.js`, `work log.md`.
+- Validation: focused Playbook Candidate tests pass 12/12. Full Mission Control tests/build not run yet because orchestrator/UI integration remains pending.
+- Next: Parent integrates Playbook events and fail-closed replay through `mission-orchestrator.js`, then adds presenter/UI and candidate-wide verification.
+## 2026-08-25 06:07:12 +07:00 — Ticket 06 team lanes integrated at checkpoint
+
+- Outcome: Terra completed event-sourced Playbook lifecycle/replay and Luna completed pure Playbook Room rendering. Parent caught and fixed cross-lane action/empty-state mismatches with TDD.
+- Files changed: Ticket 06 core/orchestrator/view modules and tests; `.scratch/mission-control-ticket-06/assurance-ledger.md`; `hotcache.md`; `work log.md`.
+- Validation: parent combined focused suite 80/80; cross-lane RED 6/8 then GREEN 8/8; JavaScript syntax and scoped diff checks passed. Terra and Luna persisted runtime gates both pass at required model/effort.
+- Remaining: authentic Playbook reviewer transport, `main.js`/CSS UI integration, full tests/build, visual/keyboard QA, final-strict readiness and reviewer verdict. No deployment.

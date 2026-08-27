@@ -1,25 +1,28 @@
 # Hot Cache
 
-Updated: 2026-07-30 16:07:17 +07:00 (Asia/Bangkok)
+Updated: 2026-08-28 02:39:32 +07:00 (Asia/Bangkok)
 
-## Ticket 04 — bounded agent assignment
+## Latest — TASK-049 scoped checkpoint authorized
 
-- Ticket 04 is complete in `codex-mission-control/`. The Mission Orchestrator routes explicit, validated Assignments through an agent adapter without depending on Codex Desktop transport details.
-- Routing selects the smallest capable configured role from declared capability and risk. The Assignment bounds goal, acceptance criteria, Context slice, ownership, effective permission, budget, and expected Evidence.
-- Run replay now records routed, started, progress, completed, blocked, and error outcomes. Completion requires structured Artifacts and Evidence; blocked output preserves the blocker, attempted alternatives, and required authority.
-- Permission cannot exceed Brief mutation authority, ownership must remain beneath authorized roots, duplicate dispatch fails before append, malformed replay fails closed, and the first terminal observation stops the stream.
-- The UI separates role, effective permission, observable model metadata, runtime state, Assignment, elapsed time, and Evidence. A host may inject `globalThis.codexAgentTransport`; otherwise the app reports an honest disconnected state.
-- Validation passed: 32/32 tests, syntax checks, Vite production build, desktop 1440×960 and mobile 390×844 browser QA with no global overflow or console errors, and a bounded read-only `luna_worker` smoke with no touched files. Final Spec review found no actionable issue.
-- Implementation commits: `93449ed`, `37904ad`, and `a7f2e66`. Live evidence is recorded at `.scratch/codex-mission-control/ticket-04-live-smoke.md`.
+- TASK-049 is complete and the owner authorized the exact Tickets 06-07 checkpoint from base `baac8dd`: 36 paths comprising 16 source/tests, 9 tracked prototype deletions, 4 tracker/spec files, and 7 historical Ticket 06 assurance receipts.
+- Explicitly exclude all agent/config changes, `.planning/`, `AGENTS.md`, graph/build output, runtime data, Nihongo Dojo, and other workstreams. No ambiguous path remains.
+- Scoped tracked/untracked whitespace checks, secret-pattern scan, JSON/JSONL parsing, assurance hash/reference checks, terminal-state checks, and both Luna runtime gates passed. Ticket 06 stays `parent-completed` / `review-exhausted` / `final-strict-not-achieved`; its candidate/readiness receipts are historical and must not be regenerated.
+- Behavior source/tests predate the recorded green 169/169 Node suite, syntax, production-copy search, Vite build, and desktop/mobile browser QA. Only tracker files changed afterward, so full behavior validation was not rerun.
+- Scope authorization is limited to the exact 36-path checkpoint and commit message `feat: complete mission control playbook and operations UI`. Do not push, merge, release, or deploy.
 
-## Mission Control state
+## Latest — Mission Control Ticket 07 complete
 
-- Ticket 01 and UI-01 are complete; UI-01 is committed as `6561da6`.
-- Ticket 02 correction/control loops are the next independent product slice. Ticket 05 is now blocked only by Ticket 02.
-- The browser host bridge remains optional and unavailable by default. The live smoke used the current Codex task runtime and is recorded separately rather than presented as browser telemetry.
+- TASK-048 is DONE. Mission Control now has URL-restored Mission/agent/lifecycle/risk/time filters; traceable operational aggregates; and coherent Mission Detail, Runs & Artifacts, Decision Rooms, Quality Gates, Approval Room, Playbooks, Metrics, and Settings navigation.
+- Aggregate values bind to replayed events and Evidence; missing runtime facts remain explicitly unavailable. Responsive/accessibility work covers semantic labelled controls, focus styles, reduced motion, mobile horizontal navigation, and local-only authority boundaries.
+- Tracked throwaway terminal/UI prototype shells were deleted after their decisions/tests were absorbed and remain recoverable from Git history.
+- TDD focused slices passed. Final validation: 169/169 Node tests, JavaScript syntax, scoped diff/whitespace, production-copy search, Vite build, and browser QA at 1440×960 and 390×844 with no page overflow or console errors.
+- Browser tooling did not advance Tab focus and timed out on native cancel confirmation; deterministic keyboard semantics and cancel/replay contracts passed. No deployment or commit.
+
+## Prior — Mission Control Ticket 06
+
+- TASK-047 remains DONE and uncommitted. Its terminal assurance state is `parent-completed` / `final-strict-not-achieved`, with no known product blocker. Preserve `.scratch/mission-control-ticket-06/` receipts.
 
 ## Workspace cautions
 
-- Nihongo Dojo remains separate and untouched by Mission Control work.
-- Preserve unrelated user changes and the existing `nihongo-dojo/app/globals.css` change.
-- Do not deploy without an explicit request.
+- Preserve unrelated dirty/untracked agent configuration, graph output, Nihongo Dojo, and generated assets.
+- Do not deploy, release, push, merge, or commit without explicit authorization.

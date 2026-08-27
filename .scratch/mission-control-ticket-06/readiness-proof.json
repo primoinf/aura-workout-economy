@@ -1,0 +1,21 @@
+{
+  "command": "python C:/Users/HYPERX/.agents/skills/solweaver/scripts/validate_final_strict_packet.py --readiness .scratch/mission-control-ticket-06/readiness.json --ledger .scratch/mission-control-ticket-06/assurance-ledger.md --attempts .scratch/mission-control-ticket-06/review-attempts.jsonl --packet .scratch/mission-control-ticket-06/review-packet.md --candidate-manifest .scratch/mission-control-ticket-06/candidate-manifest.json",
+  "result": {
+    "assurancePacketId": "ticket06-packet-03-01a039cf7dc9",
+    "assuranceUnitId": "codex-mission-control/playbooks/ticket-06",
+    "boundEvidence": {
+      "attemptsSha256": "0fcce407cf8451afe6d44fc2d3b35fcec716a613d171b9f83f57585f95f5bb2c",
+      "candidateManifestSha256": "f12766880bb9223c9af738f3e1c8f470bdca3642aec687a0a53305a36de515da",
+      "ledgerSha256": "b83b8e64f9deb4d4d7df30fcff79f9816f2c41c9179405c1c6e51ac4f995e15d",
+      "packetSha256": "17c7d3111d0ea3e4934c769b9ded67bb3c9a67ca3005e396b0751c8c4172cb6e"
+    },
+    "frozenCandidateId": "sha256:02024c0e466565b601c7d44364ce9bda648f7b88ded0852f8ccecc6aab6564a1",
+    "maxReviewCalls": 3,
+    "proofType": "solweaver-final-strict-readiness-v1",
+    "readinessGate": "pass",
+    "readinessRecordSha256": "5fe4d4731684fc0e60d9e9c3dbc6d63391014c079ef9b12f428b68d98c708955",
+    "reopenGeneration": 0,
+    "reviewCallsUsed": 2,
+    "validationPhase": "pre-reservation"
+  }
+}

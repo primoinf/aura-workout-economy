@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "solweaver-parent-recovery-proof-v1",
+  "assuranceUnitId": "codex-mission-control/playbooks/ticket-06",
+  "reopenGeneration": 0,
+  "generatedAt": "2026-08-27T04:43:13+07:00",
+  "base": "baac8ddc340198cf445013d5234b2c0924f98e80",
+  "frozenCandidateId": "sha256:da024ca365cc9ec0afead6aa2d9025f229aa9dd3a790c226bd2deaaec0dec04f",
+  "bindings": {
+    "candidateManifest": {
+      "path": ".scratch/mission-control-ticket-06/candidate-manifest.json",
+      "sha256": "d905c60c73b8f970715b503639596a030ea42c8e09893833b03f17270cf52f46"
+    },
+    "assuranceLedger": {
+      "path": ".scratch/mission-control-ticket-06/assurance-ledger.md",
+      "sha256": "1ddba84b396e42b7a42a60cf9eefd392d51a7047a560772ba39884be30027eb4"
+    },
+    "attemptJournal": {
+      "path": ".scratch/mission-control-ticket-06/review-attempts.jsonl",
+      "sha256": "a81ec20b1a246df6effc16d0d7e9ab467fbc496036944d9c04c175412c171657"
+    },
+    "historicalReviewPacket": {
+      "path": ".scratch/mission-control-ticket-06/review-packet.md",
+      "sha256": "645e0c5e7c738b65e60941807a6a343dc0aeda364a3353b9b8ea9679aaad1185"
+    }
+  },
+  "verification": {
+    "targetedRegression": "2/2 pass",
+    "focusedTicket06": "103/103 pass",
+    "fullNodeSuite": "157/157 pass",
+    "javascriptSyntax": "pass",
+    "viteProductionBuild": "pass",
+    "scopedTrackedDiffCheck": "pass",
+    "scopedUntrackedDiffCheck": "pass (git diff --no-index exit 1 for differences, no whitespace-error output)"
+  },
+  "reviewCallsUsed": 3,
+  "reviewStatus": "review-exhausted",
+  "unitStatus": "parent-completed",
+  "workStatus": "complete",
+  "acceptanceStatus": "met",
+  "knownBlockers": "none",
+  "independentAttestation": "not-obtained-within-budget",
+  "assuranceStatus": "final-strict-not-achieved",
+  "protectedActionsPerformed": []
+}
