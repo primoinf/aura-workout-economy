@@ -254,7 +254,7 @@ function deriveMetrics(missions) {
   const approvals = missions.filter(
     (mission) =>
       mission.status === "APPROVAL_REQUIRED" ||
-      mission.playbook?.status === "PROMOTION_REQUESTED",
+      mission.playbook?.status === "REVIEW_APPROVED",
   );
 
   return Object.freeze({

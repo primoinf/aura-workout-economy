@@ -1,0 +1,18 @@
+{
+  "assurancePacketId": "task050-packet-01-01a05ea1",
+  "assuranceUnitId": "GENERAL/mission-control/push-readiness",
+  "boundEvidence": {
+    "attemptsSha256": "bf268a10d1e1e0e0d478bfd2bc961c736078baf1ead5fcd3141b96c365516bc2",
+    "candidateManifestSha256": "10db5a8908db842604641efeb63b427a9b9793de8f18a765331b3d087d0edbd1",
+    "ledgerSha256": "990c4eb1c5aac5634861095ec3bdc1df84f4510bc4dac2b348ca0efdf65ffaea",
+    "packetSha256": "99aba5cd8d29f82491599cec4f154c3ad4ea7a8e08c08e1dff98988b58f94a25"
+  },
+  "frozenCandidateId": "sha256:dbac0807e7eba7b2987881f690824d6aa8737af07da579c3c5ce31d6aed8c500",
+  "maxReviewCalls": 3,
+  "proofType": "solweaver-final-strict-readiness-v1",
+  "readinessGate": "pass",
+  "readinessRecordSha256": "3df15c23529e92f44741684a297e49a3cb2120e64e5c4e1de35f859c9e675dd1",
+  "reopenGeneration": 0,
+  "reviewCallsUsed": 0,
+  "validationPhase": "pre-reservation"
+}

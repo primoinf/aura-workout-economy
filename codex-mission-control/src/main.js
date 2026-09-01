@@ -3,6 +3,7 @@ import {
   createBrowserWriteCoordinator,
   createLocalStorageEventStore,
   createMissionOrchestrator,
+  deriveTransportObservedReleaseValidation,
   getOpenExecutionTransportReservations,
 } from "./mission-orchestrator.js";
 import {
@@ -41,81 +42,29 @@ import {
   renderMissionNavigation,
 } from "./mission-navigation.js";
 import { renderMissionAuditView } from "./mission-audit-views.js";
+import { createContextPackCapture } from "./context-pack-capture.js";
 
-const liveAgentTransport = globalThis.codexAgentTransport ?? null;
-const localObservedTransport = {
-  async *run({ roleId, assignment, reviewContext }) {
-    const runId = `local-run:${assignment.id}:${crypto.randomUUID()}`;
-    const startedAt = new Date().toISOString();
-    yield {
-      kind: "started",
-      runId,
-      occurredAt: startedAt,
-      model: {
-        name: "local-observed-simulator",
-        reasoningEffort: "deterministic",
-      },
-    };
-    const completedAt = new Date().toISOString();
-    const artifactUri = `local://assignments/${assignment.id}/${runId}`;
-    const evidenceRef = `${artifactUri}/evidence`;
-    yield {
-      kind: "completed",
-      runId,
-      occurredAt: completedAt,
-      summary: `${roleId} completed ${assignment.id} in the local observable simulator`,
-      artifacts: [
-        {
-          name:
-            assignment.workKind === "review"
-              ? `Review report for ${assignment.id}`
-              : `Candidate output for ${assignment.id}`,
-          uri: artifactUri,
-          summary: `Event-backed local output from ${roleId}`,
-          content: JSON.stringify(
-            {
-              assignmentId: assignment.id,
-              roleId,
-              runId,
-              externalMutation: "none",
-            },
-            null,
-            2,
-          ),
-          ...(assignment.workKind === "review"
-            ? {
-                reviewOutcome: {
-                  outcome: "PASSED",
-                  ...(reviewContext?.playbook
-                    ? {
-                        ...structuredClone(reviewContext.playbook),
-                        rationale:
-                          "The local read-only Sol Reviewer simulation found no critical regression or unmet declared target.",
-                      }
-                    : {
-                        candidateArtifactRefs:
-                          reviewContext?.candidateArtifactRefs ?? [],
-                      }),
-                  findings: [],
-                },
-              }
-            : {}),
-        },
-      ],
-      evidence: [
-        {
-          ref: evidenceRef,
-          kind: assignment.workKind === "review" ? "review" : "local-run",
-          summary: `Observed ${assignment.workKind} completion from ${roleId}`,
-        },
-      ],
-    };
-  },
-};
-const agentRouter = createAgentRoutingAdapter({
-  transport: liveAgentTransport ?? localObservedTransport,
-});
-const agentRoutingConnected = Boolean(liveAgentTransport);
+const liveAgentTransport =
+  typeof globalThis.codexAgentTransport?.run === "function"
+    ? globalThis.codexAgentTransport
+    : null;
+const agentRouter = liveAgentTransport
+  ? createAgentRoutingAdapter({ transport: liveAgentTransport })
+  : null;
+const agentRoutingConnected = liveAgentTransport !== null;
+const AGENT_DISPATCH_ACTIONS = new Set([
+  "dispatch_execution_wave",
+  "record_playbook_independent_review",
+  "start_correction",
+  "start_run",
+]);
+const AGENT_TRANSPORT_UNAVAILABLE_MESSAGE =
+  "Agent transport is disconnected. Agent-backed dispatch is unavailable until a Codex transport is connected.";
+const contextPackCapture = createContextPackCapture(
+  globalThis.codexContextCapture ?? null,
+);
+const CONTEXT_CAPTURE_UNAVAILABLE_MESSAGE =
+  "Context capture is unavailable. Connect a workspace Context capture adapter before recording a Context Pack.";
 const eventStore = createLocalStorageEventStore();
 const orchestrator = createMissionOrchestrator({
   eventStore,
@@ -124,6 +73,54 @@ const orchestrator = createMissionOrchestrator({
 });
 
 const app = document.querySelector("#app");
+
+function isAgentDispatchUnavailable(action) {
+  return !agentRoutingConnected && AGENT_DISPATCH_ACTIONS.has(action);
+}
+
+function assertAgentDispatchAvailable(action) {
+  if (isAgentDispatchUnavailable(action)) {
+    throw new Error(AGENT_TRANSPORT_UNAVAILABLE_MESSAGE);
+  }
+}
+
+function unavailableActionMessage(action) {
+  if (isAgentDispatchUnavailable(action)) {
+    return AGENT_TRANSPORT_UNAVAILABLE_MESSAGE;
+  }
+  if (
+    ["capture_context", "revise_context"].includes(action) &&
+    !contextPackCapture.connected
+  ) {
+    return CONTEXT_CAPTURE_UNAVAILABLE_MESSAGE;
+  }
+  return null;
+}
+
+function assertActionAvailable(action) {
+  const message = unavailableActionMessage(action);
+  if (message) {
+    throw new Error(message);
+  }
+}
+
+function actionButtonAttributes(action, description) {
+  const message = unavailableActionMessage(action);
+  return message
+    ? `disabled aria-disabled="true" title="${escapeHtml(message)}"`
+    : `title="${escapeHtml(description)}"`;
+}
+
+function agentTransportStatusCopy(agentTelemetry) {
+  if (agentRoutingConnected) {
+    return agentTelemetry === "Observed"
+      ? "Agent transport connected · Assignment / Run observations available"
+      : "Agent transport connected · awaiting observations";
+  }
+  return agentTelemetry === "Observed"
+    ? "Agent transport disconnected · replayed Assignment / Run observations"
+    : "Agent transport disconnected · dispatch unavailable";
+}
 
 function localEventRef(mission, kind) {
   return `local://missions/${mission.id}/context-${mission.contextPackVersion}/${kind}-event-${mission.events.length + 1}`;
@@ -147,14 +144,13 @@ const nextSteps = {
   capture_context: {
     label: "Capture Context",
     eyebrow: "Context Pack",
-    description: "Bind the approved Brief to a versioned local Context Pack.",
-    reason: "Captured the bounded Context Pack from the approved Brief",
-    payload: (mission) => ({
-      context: {
-        summary: `Local Context Pack for ${mission.brief.goal}`,
-        sourceRefs: ["local://brief", "local://ticket-01"],
-      },
-    }),
+    description: contextPackCapture.connected
+      ? "Capture current workspace rules, repository state, recent context, task status, and decisions with source-backed facts and assumptions."
+      : CONTEXT_CAPTURE_UNAVAILABLE_MESSAGE,
+    reason: "Captured the source-backed workspace Context Pack",
+    payload: () => {
+      throw new Error("Context capture must use the workspace adapter.");
+    },
     evidenceRefs: [],
   },
   accept_plan: {
@@ -195,6 +191,25 @@ const nextSteps = {
       const inspectId = `inspect:${mission.id}:context-${mission.contextPackVersion}`;
       const decisionId = `architect:${mission.id}:context-${mission.contextPackVersion}`;
       const buildId = `build:${mission.id}:context-${mission.contextPackVersion}`;
+      const validationAssignments = mission.brief.releaseRequired
+        ? mission.brief.releasePlan.requiredValidationGates.map(
+            (gateType, index) =>
+              assignment(
+                `validate-${index + 1}`,
+                `Run the declared ${gateType} release validation gate and return its structured transport-observed outcome`,
+                {
+                  dependsOn: [buildId],
+                  validationGateType: gateType,
+                  expectedEvidence: [
+                    `One Artifact containing validationOutcome with type ${gateType}, passing status/outcome, and an Evidence ref emitted by this transport Run`,
+                  ],
+                },
+              ),
+          )
+        : [];
+      const reviewDependencies = validationAssignments.length
+        ? validationAssignments.map((candidate) => candidate.id)
+        : [buildId];
       return {
         plan: {
           steps: [
@@ -235,11 +250,12 @@ const nextSteps = {
                   writePaths: workspaceWrite ? authorizedRoots : [],
                 },
               }),
+              ...validationAssignments,
               assignment(
                 "review",
                 "Independently review the completed candidate",
                 {
-                  dependsOn: [buildId],
+                  dependsOn: reviewDependencies,
                   workKind: "review",
                   risk: "high",
                   expectedEvidence: [
@@ -314,10 +330,10 @@ const nextSteps = {
     eyebrow: "Run",
     description: agentRoutingConnected
       ? "Dispatch the declared Assignment through the connected Codex transport."
-      : "Dispatch the declared Assignment through the local observable simulator without external mutation.",
+      : "Agent transport is disconnected. This Assignment cannot be dispatched until a Codex transport is available.",
     reason: agentRoutingConnected
       ? "Dispatched the planned bounded Assignment"
-      : "Dispatched the bounded Assignment to the local observable simulator",
+      : "Agent transport is unavailable for this Assignment",
     payload: () => ({
       run: { agentRole: "terra-builder-mock", mode: "local-only" },
     }),
@@ -455,24 +471,39 @@ const nextSteps = {
   pass_validation: {
     label: "Pass Validation",
     eyebrow: "Validation Gate",
-    description: "Record passing local acceptance evidence.",
-    reason: "Local acceptance validation passed",
-    payload: (mission) => ({
-      validation: {
-        summary: "Lifecycle and replay acceptance checks passed",
-        details: {
-          gate: "Validation Gate",
-          candidateRef: mission.artifact?.uri ?? null,
-          evidenceRef: localEventRef(mission, "validation-pass"),
-          outcome: "passed",
-          checks: [
-            "Lifecycle transition is replayable",
-            "Current Artifact and gate Evidence are present",
-          ],
+    description:
+      "Record passing acceptance Evidence; release Missions use only completed transport-observed gate outcomes.",
+    reason: "Acceptance validation passed",
+    payload: (mission) => {
+      if (mission.brief.releaseRequired) {
+        const observed = deriveTransportObservedReleaseValidation(mission);
+        return {
+          validation: {
+            summary: "Every declared release validation gate passed through transport",
+            gates: observed.gates,
+          },
+        };
+      }
+      return {
+        validation: {
+          summary: "Lifecycle and replay acceptance checks passed",
+          details: {
+            gate: "Validation Gate",
+            candidateRef: mission.artifact?.uri ?? null,
+            evidenceRef: localEventRef(mission, "validation-pass"),
+            outcome: "passed",
+            checks: [
+              "Lifecycle transition is replayable",
+              "Current Artifact and gate Evidence are present",
+            ],
+          },
         },
-      },
-    }),
-    evidenceRefs: (mission) => [localEventRef(mission, "validation-pass")],
+      };
+    },
+    evidenceRefs: (mission) =>
+      mission.brief.releaseRequired
+        ? deriveTransportObservedReleaseValidation(mission).evidenceRefs
+        : [localEventRef(mission, "validation-pass")],
   },
   fail_validation: {
     label: "Fail Validation",
@@ -511,15 +542,9 @@ const nextSteps = {
     description:
       "Create a new material Context Pack version and invalidate downstream candidate Evidence.",
     reason: "Material Context changed; downstream Evidence was invalidated",
-    payload: (mission) => ({
-      context: {
-        summary: `Revised Context Pack v${mission.contextPackVersion + 1} for ${mission.brief.goal}`,
-        sourceRefs: [
-          ...(mission.context?.sourceRefs ?? []),
-          localEventRef(mission, "context-revision"),
-        ],
-      },
-    }),
+    payload: () => {
+      throw new Error("Context revision must use the workspace adapter.");
+    },
     evidenceRefs: [],
   },
   block_mission: {
@@ -675,7 +700,7 @@ function renderShell(content, view) {
           <span class="sidebar-team-dot ${commandDeck.metrics.agentTelemetry === "Observed" ? "is-observed" : ""}" aria-hidden="true"></span>
           <div>
             <strong>${commandDeck.metrics.configuredAgents} configured roles</strong>
-            <small>${commandDeck.metrics.agentTelemetry === "Observed" ? "Assignment / Run observations available" : agentRoutingConnected ? "Agent transport connected · awaiting observations" : "Local observable simulator · awaiting observations"}</small>
+            <small>${agentTransportStatusCopy(commandDeck.metrics.agentTelemetry)}</small>
           </div>
         </div>
         <div class="local-mode">
@@ -1041,7 +1066,7 @@ function renderMissionDetail(mission) {
                           ${secondaryActions
                             .map(
                               ({ action, step: secondaryStep }) => `
-                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" title="${escapeHtml(secondaryStep.description)}">
+                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" ${actionButtonAttributes(action, secondaryStep.description)}>
                                   ${escapeHtml(secondaryStep.label)}
                                 </button>
                               `,
@@ -1067,7 +1092,7 @@ function renderMissionDetail(mission) {
                           <h2 id="next-action-title">${escapeHtml(step.label)}</h2>
                           <p>${escapeHtml(step.description)}</p>
                         </div>
-                        <button class="primary-button action-button" type="button" data-run-action="${escapeHtml(nextAction)}">
+                        <button class="primary-button action-button" type="button" data-run-action="${escapeHtml(nextAction)}" ${actionButtonAttributes(nextAction, step.description)}>
                           ${escapeHtml(step.label)} <span aria-hidden="true">→</span>
                         </button>
                       </section>
@@ -1085,7 +1110,7 @@ function renderMissionDetail(mission) {
                           ${secondaryActions
                             .map(
                               ({ action, step: secondaryStep }) => `
-                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" title="${escapeHtml(secondaryStep.description)}">
+                                <button class="secondary-button ${action === "cancel_mission" ? "danger-button" : ""}" type="button" data-run-action="${escapeHtml(action)}" ${actionButtonAttributes(action, secondaryStep.description)}>
                                   ${escapeHtml(secondaryStep.label)}
                                 </button>
                               `,
@@ -1156,6 +1181,7 @@ function renderMissionDetail(mission) {
                 ${renderBriefField("Residual risk", mission.brief.releasePlan.residualRisk)}
                 ${renderBriefField("External action", mission.brief.releasePlan.intendedExternalAction)}
                 ${renderBriefField("Rollback", mission.brief.releasePlan.rollbackCommitment)}
+                ${renderBriefList("Required validation gates", mission.brief.releasePlan.requiredValidationGates)}
               `
               : ""
           }
@@ -1312,6 +1338,11 @@ function renderBriefDialog() {
             <span>Rollback commitment</span>
             <textarea name="rollbackCommitment" rows="3">Restore the previous immutable release</textarea>
           </label>
+          <label class="field span-2">
+            <span>Required validation gates (one type per line)</span>
+            <textarea name="requiredValidationGates" rows="3">unit-tests
+integration-tests</textarea>
+          </label>
         </div>
 
         <div class="dialog-actions">
@@ -1423,12 +1454,17 @@ function wireShellEvents() {
   document.querySelectorAll("[data-run-action]").forEach((button) => {
     button.addEventListener("click", (event) => {
       const action = event.currentTarget.dataset.runAction;
-      advanceMission(action);
+      return advanceMission(action);
     });
   });
   document.querySelectorAll("[data-playbook-action]").forEach((button) => {
+    if (isAgentDispatchUnavailable(button.dataset.playbookAction)) {
+      button.disabled = true;
+      button.title = AGENT_TRANSPORT_UNAVAILABLE_MESSAGE;
+      button.setAttribute("aria-disabled", "true");
+    }
     button.addEventListener("click", (event) => {
-      handlePlaybookAction(event.currentTarget.dataset.playbookAction);
+      return handlePlaybookAction(event.currentTarget.dataset.playbookAction);
     });
   });
 }
@@ -1438,11 +1474,7 @@ async function handlePlaybookAction(action) {
   try {
     let updated;
     if (action === "record_playbook_independent_review") {
-      if (!agentRoutingConnected) {
-        throw new Error(
-          "Independent Playbook review requires a connected Codex agent transport.",
-        );
-      }
+      assertAgentDispatchAvailable(action);
       updated = await orchestrator.dispatchPlaybookIndependentReview(
         mission.id,
         {
@@ -1454,13 +1486,8 @@ async function handlePlaybookAction(action) {
     } else {
       let input = {};
       if (action === "evaluate_playbook_candidate") {
-        const source = window.prompt(
-          "Paste the bounded Candidate evaluation JSON. It must include retrospective, Baseline, Candidate, identical versioned evaluation cases, critical regression case IDs, all six metrics, and a declared target improvement.",
-        );
-        if (source === null) return;
         input = {
           actor: mission.brief.releaseAuthority,
-          candidate: JSON.parse(source),
         };
       } else if (
         [
@@ -1659,6 +1686,9 @@ async function handleCreateMission(event) {
                 rollbackCommitment: String(
                   form.get("rollbackCommitment"),
                 ).trim(),
+                requiredValidationGates: lines(
+                  "requiredValidationGates",
+                ),
               },
             }
           : {}),
@@ -1697,6 +1727,27 @@ async function advanceMission(action, overrides = {}) {
   }
 
   try {
+    assertActionAvailable(action);
+    let payload = overrides.payload;
+    if (["capture_context", "revise_context"].includes(action)) {
+      const contextPackVersion =
+        action === "revise_context"
+          ? mission.contextPackVersion + 1
+          : mission.contextPackVersion;
+      const capture = await contextPackCapture.capture({
+        missionId: mission.id,
+        brief: mission.brief,
+        contextPackVersion,
+        previousContext:
+          action === "revise_context" ? mission.context : null,
+      });
+      if (!capture.ready) {
+        throw new Error(
+          `Context capture is unavailable: ${capture.unavailableSources.join(", ")}.`,
+        );
+      }
+      payload = { context: capture.context };
+    }
     const evidenceRefs =
       overrides.evidenceRefs ??
       (typeof step.evidenceRefs === "function"
@@ -1726,7 +1777,7 @@ async function advanceMission(action, overrides = {}) {
             })
         : await orchestrator.execute(mission.id, {
             type: MISSION_COMMAND_BY_ACTION[action],
-            payload: overrides.payload ?? step.payload(mission),
+            payload: payload ?? step.payload(mission),
             actor,
             reason: step.reason,
             evidenceRefs,

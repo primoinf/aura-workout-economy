@@ -40,6 +40,47 @@ const assignment = {
   risk: "low",
 };
 
+function sourceBackedContext(summary) {
+  return {
+    summary,
+    capturedAt: "2026-08-08T10:59:00.000Z",
+    sources: [
+      {
+        kind: "workspace-rules",
+        ref: "workspace://AGENTS.md",
+        status: "available",
+      },
+      {
+        kind: "repository-state",
+        ref: "git://status@784ac616",
+        status: "available",
+      },
+      {
+        kind: "recent-context",
+        ref: "workspace://hotcache.md",
+        status: "available",
+      },
+      {
+        kind: "task-status",
+        ref: "workspace://task-board.md#TASK-050",
+        status: "available",
+      },
+      {
+        kind: "decisions",
+        ref: "workspace://decisions/TASK-050",
+        status: "available",
+      },
+    ],
+    facts: [
+      {
+        statement: `${summary} is source-backed test Context.`,
+        sourceRefs: ["workspace://task-board.md#TASK-050"],
+      },
+    ],
+    assumptions: [],
+  };
+}
+
 function task(id, overrides = {}) {
   return {
     ...structuredClone(assignment),
@@ -150,7 +191,7 @@ function createPlannedMission(orchestrator, id, assignments = [task(id)]) {
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: `Context for ${id}` } },
+    payload: { context: sourceBackedContext(`Context for ${id}`) },
     actor: "mission-owner",
     reason: `Capture Context for ${id}`,
   });
@@ -223,7 +264,9 @@ test("Task Graph and legacy single-Assignment lifecycles cannot be mixed", async
 
   const revised = orchestrator.execute(planned.id, {
     type: "REVISE_CONTEXT",
-    payload: { context: { summary: "Replace the Task Graph Context" } },
+    payload: {
+      context: sourceBackedContext("Replace the Task Graph Context"),
+    },
     actor: "mission-owner",
     reason: "Replace the Task Graph with a legacy plan",
   });
@@ -278,7 +321,7 @@ test("04c6ba7 Mission history normalizes legacy ownership aliases and Sol Review
   });
   source.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Legacy review Context" } },
+    payload: { context: sourceBackedContext("Legacy review Context") },
     actor: "mission-owner",
     reason: "Capture legacy Context",
   });
@@ -332,7 +375,7 @@ test("Task Graph planning rejects writable ownership outside Mission authority",
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Bounded Context" } },
+    payload: { context: sourceBackedContext("Bounded Context") },
     actor: "mission-owner",
     reason: "Capture bounded Context",
   });
@@ -381,7 +424,7 @@ test("Task Graph planning requires a terminal independent review that covers eve
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Review coverage Context" } },
+    payload: { context: sourceBackedContext("Review coverage Context") },
     actor: "mission-owner",
     reason: "Capture review coverage Context",
   });
@@ -926,7 +969,9 @@ test("legacy Assignment dispatch uses the same global ownership admission contro
   });
   orchestrator.execute(legacyCreated.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Legacy Assignment Context" } },
+    payload: {
+      context: sourceBackedContext("Legacy Assignment Context"),
+    },
     actor: "mission-owner",
     reason: "Capture legacy Context",
   });
@@ -1026,7 +1071,9 @@ test("legacy correction dispatch uses the same global ownership admission contro
   });
   orchestrator.execute(legacyCreated.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Legacy correction Context" } },
+    payload: {
+      context: sourceBackedContext("Legacy correction Context"),
+    },
     actor: "mission-owner",
     reason: "Capture legacy correction Context",
   });
@@ -1512,7 +1559,9 @@ test("Decision Room replay rejects Evidence invalidated by a material Context re
 
   const revised = orchestrator.execute(firstPlan.id, {
     type: "REVISE_CONTEXT",
-    payload: { context: { summary: "Material Context version two" } },
+    payload: {
+      context: sourceBackedContext("Material Context version two"),
+    },
     actor: "mission-owner",
     reason: "Replace the material Context",
   });

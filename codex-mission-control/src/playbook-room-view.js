@@ -107,7 +107,7 @@ export function buildPlaybookActionCommand(action, input = {}) {
     command.field === "request"
       ? {}
       : command.field === "candidate"
-        ? input.candidate
+        ? {}
         : { rationale: input.rationale };
   return freezeDeep({
     type: command.type,

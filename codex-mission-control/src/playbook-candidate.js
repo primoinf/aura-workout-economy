@@ -158,6 +158,100 @@ function assertCriticalRegressionCaseIds(value, subject) {
   }
 }
 
+function metricsFromCaseResults(caseResults) {
+  const total = (field) =>
+    caseResults.reduce((sum, result) => sum + result[field], 0);
+  return {
+    acceptancePassRate: Number(
+      (
+        total("acceptanceScore") / caseResults.length
+      ).toFixed(12),
+    ),
+    criticalRegressions: caseResults.filter(
+      (result) => result.criticalRegression,
+    ).length,
+    reviewFindings: total("reviewFindings"),
+    retries: total("retries"),
+    cycleTimeMs: total("cycleTimeMs"),
+    tokenUse: total("tokenUse"),
+  };
+}
+
+function assertObservableCaseResults(value, subject) {
+  const caseResults = value.caseResults;
+  const expectedCaseIds = value.evaluationSet.caseIds;
+  if (
+    !Array.isArray(caseResults) ||
+    caseResults.length !== expectedCaseIds.length ||
+    caseResults.some(
+      (result, index) => result?.caseId !== expectedCaseIds[index],
+    )
+  ) {
+    throw new Error(
+      `Playbook Candidate ${subject} requires one observable result per evaluation case.`,
+    );
+  }
+  const artifactRefs = [];
+  const evidenceRefs = [];
+  for (const result of caseResults) {
+    if (
+      !assertCaseMetric(result.acceptanceScore, true) ||
+      typeof result.criticalRegression !== "boolean" ||
+      !assertCaseMetric(result.reviewFindings) ||
+      !assertCaseMetric(result.retries) ||
+      !assertCaseMetric(result.cycleTimeMs) ||
+      !assertCaseMetric(result.tokenUse) ||
+      !isObservableReference(result.artifactRef) ||
+      !Array.isArray(result.evidenceRefs) ||
+      result.evidenceRefs.length === 0 ||
+      result.evidenceRefs.some(
+        (reference) => !isObservableReference(reference),
+      ) ||
+      new Set(result.evidenceRefs).size !== result.evidenceRefs.length
+    ) {
+      throw new Error(
+        `Playbook Candidate ${subject} case results require Artifact, Evidence, and finite non-negative observations.`,
+      );
+    }
+    artifactRefs.push(result.artifactRef);
+    evidenceRefs.push(...result.evidenceRefs);
+  }
+  if (
+    new Set(artifactRefs).size !== artifactRefs.length ||
+    new Set(evidenceRefs).size !== evidenceRefs.length
+  ) {
+    throw new Error(
+      `Playbook Candidate ${subject} case observations must use distinct Artifact and Evidence references.`,
+    );
+  }
+  if (!sameValue(value.metrics, metricsFromCaseResults(caseResults))) {
+    throw new Error(
+      `Playbook Candidate ${subject} metrics must match observable case results.`,
+    );
+  }
+  const criticalRegressionCaseIds = caseResults
+    .filter((result) => result.criticalRegression)
+    .map((result) => result.caseId);
+  if (!sameStrings(value.criticalRegressionCaseIds, criticalRegressionCaseIds)) {
+    throw new Error(
+      `Playbook Candidate ${subject} critical regression case IDs must match observable case results.`,
+    );
+  }
+}
+
+function assertCaseMetric(value, rate = false) {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    (!rate || value <= 1)
+  );
+}
+
+function isObservableReference(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 function assertHumanDecision(humanDecision, action) {
   if (
     typeof humanDecision.actor !== "string" ||
@@ -259,6 +353,13 @@ export function createPlaybookCandidate({
   assertProtectedConfiguration(candidate?.protectedConfiguration, "Candidate");
   assertCriticalRegressionCaseIds(baseline, "Baseline");
   assertCriticalRegressionCaseIds(candidate, "Candidate");
+  assertObservableCaseResults(baseline, "Baseline");
+  assertObservableCaseResults(candidate, "Candidate");
+  if (!sameValue(retrospective.metrics, baseline.metrics)) {
+    throw new Error(
+      "Playbook Candidate retrospective metrics must match the observed Baseline.",
+    );
+  }
   return deepFreeze({
     status: "EVALUATED",
     retrospective: clone(retrospective),

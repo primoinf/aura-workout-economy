@@ -289,3 +289,51 @@ test("operational aggregates expose their exact event and Evidence provenance an
   assert.equal(noTelemetry.metrics.tokenUse.status, "unavailable");
   assert.match(noTelemetry.metrics.tokenUse.explanation, /not recorded/i);
 });
+
+test("approval demand counts reviewed Playbook Candidates awaiting a human, not review requests", () => {
+  const awaitingIndependentReview = mission({
+    id: "mission-playbook-review",
+    status: "COMPLETED",
+    playbook: { status: "PROMOTION_REQUESTED" },
+    events: [
+      event(1, "MISSION_CREATED", "2026-08-27T10:00:00.000Z", {
+        missionId: "mission-playbook-review",
+      }),
+      event(2, "PLAYBOOK_PROMOTION_REQUESTED", "2026-08-27T11:00:00.000Z", {
+        missionId: "mission-playbook-review",
+      }),
+    ],
+  });
+  const awaitingHumanDecision = mission({
+    id: "mission-playbook-approval",
+    status: "COMPLETED",
+    playbook: { status: "REVIEW_APPROVED" },
+    events: [
+      event(1, "MISSION_CREATED", "2026-08-27T10:00:00.000Z", {
+        missionId: "mission-playbook-approval",
+      }),
+      event(
+        2,
+        "PLAYBOOK_INDEPENDENT_REVIEW_RECORDED",
+        "2026-08-27T12:00:00.000Z",
+        {
+          missionId: "mission-playbook-approval",
+          actor: "agent:sol_reviewer",
+          evidenceRefs: ["evidence://playbook-review"],
+        },
+      ),
+    ],
+  });
+
+  const model = deriveOperationsDashboard(
+    [awaitingIndependentReview, awaitingHumanDecision],
+    DASHBOARD_FILTER_DEFAULTS,
+    { now: "2026-08-27T13:00:00.000Z" },
+  );
+
+  assert.equal(model.metrics.approvalDemand.value, 1);
+  assert.deepEqual(
+    model.metrics.approvalDemand.sources.map((source) => source.missionId),
+    ["mission-playbook-approval"],
+  );
+});

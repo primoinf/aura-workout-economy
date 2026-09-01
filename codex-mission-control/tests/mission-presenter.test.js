@@ -10,6 +10,7 @@ import {
   createMemoryEventStore,
   createMissionOrchestrator,
 } from "../src/mission-orchestrator.js";
+import { createAgentRoutingAdapter } from "../src/agent-routing-adapter.js";
 
 const brief = {
   goal: "Ship an auditable Mission flow",
@@ -21,6 +22,206 @@ const brief = {
   mutationAuthority: "Local storage only",
   releaseAuthority: "Mission owner",
 };
+
+function sourceBackedContext(summary) {
+  return {
+    summary,
+    capturedAt: "2026-07-30T12:59:00.000Z",
+    sources: [
+      {
+        kind: "workspace-rules",
+        ref: "workspace://AGENTS.md",
+        status: "available",
+      },
+      {
+        kind: "repository-state",
+        ref: "git://status@784ac616",
+        status: "available",
+      },
+      {
+        kind: "recent-context",
+        ref: "workspace://hotcache.md",
+        status: "available",
+      },
+      {
+        kind: "task-status",
+        ref: "workspace://task-board.md#TASK-050",
+        status: "available",
+      },
+      {
+        kind: "decisions",
+        ref: "workspace://decisions/TASK-050",
+        status: "available",
+      },
+    ],
+    facts: [
+      {
+        statement: `${summary} is source-backed test Context.`,
+        sourceRefs: ["workspace://task-board.md#TASK-050"],
+      },
+    ],
+    assumptions: [],
+  };
+}
+
+function releaseTaskGraph() {
+  const contextSlice = {
+    summary: "Bound to the release Context Pack",
+    sourceRefs: ["workspace://task-board.md#TASK-050"],
+  };
+  const base = {
+    acceptanceCriteria: ["Produce observable release Evidence"],
+    contextSlice,
+    ownershipBoundary: {
+      readPaths: ["codex-mission-control/src"],
+      writePaths: [],
+    },
+    effectivePermission: "read-only",
+    budget: { maxTurns: 2, maxMinutes: 5 },
+    expectedEvidence: ["Transport-observed release Evidence"],
+    workKind: "deterministic",
+    risk: "low",
+  };
+  return {
+    capacity: 4,
+    coordinationRequired: true,
+    assignments: [
+      {
+        ...base,
+        id: "build-release-candidate",
+        goal: "Build the exact release candidate",
+        dependsOn: [],
+        workKind: "implementation",
+        risk: "medium",
+        effectivePermission: "workspace-write",
+        ownershipBoundary: {
+          readPaths: ["codex-mission-control/src"],
+          writePaths: ["codex-mission-control/src"],
+        },
+        expectedEvidence: ["Inspectable release candidate Evidence"],
+      },
+      {
+        ...base,
+        id: "validate-release-unit",
+        goal: "Run the declared unit-tests release gate",
+        dependsOn: ["build-release-candidate"],
+        validationGateType: "unit-tests",
+      },
+      {
+        ...base,
+        id: "validate-release-integration",
+        goal: "Run the declared integration-tests release gate",
+        dependsOn: ["build-release-candidate"],
+        validationGateType: "integration-tests",
+      },
+      {
+        ...base,
+        id: "review-release-candidate",
+        goal: "Independently review the exact release candidate",
+        dependsOn: [
+          "validate-release-unit",
+          "validate-release-integration",
+        ],
+        workKind: "review",
+        risk: "high",
+        expectedEvidence: ["Structured independent review outcome"],
+      },
+    ],
+  };
+}
+
+function createReleaseRouter() {
+  return createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        const assignmentId = request.assignment.id;
+        yield {
+          kind: "started",
+          runId: `run:${assignmentId}`,
+          occurredAt: "2026-07-30T13:01:00.000Z",
+        };
+        if (assignmentId === "build-release-candidate") {
+          yield {
+            kind: "completed",
+            runId: `run:${assignmentId}`,
+            occurredAt: "2026-07-30T13:02:00.000Z",
+            summary: "Built the exact release candidate",
+            artifacts: [
+              {
+                name: "release-42",
+                uri: "artifact://release-42",
+                diff: "@@ release-42 @@\n+candidate content",
+              },
+            ],
+            evidence: [
+              {
+                ref: "evidence://artifact-42",
+                kind: "test",
+                summary: "Candidate build and tests completed",
+              },
+            ],
+          };
+          return;
+        }
+        if (request.assignment.validationGateType) {
+          const gateType = request.assignment.validationGateType;
+          const evidenceRef = `evidence://validation-${gateType}`;
+          yield {
+            kind: "completed",
+            runId: `run:${assignmentId}`,
+            occurredAt: "2026-07-30T13:03:00.000Z",
+            summary: `${gateType} passed`,
+            artifacts: [
+              {
+                name: `${gateType}-validation-outcome`,
+                uri: `artifact://validation/${gateType}`,
+                validationOutcome: {
+                  type: gateType,
+                  status: "PASSED",
+                  outcome: "PASSED",
+                  evidenceRef,
+                },
+              },
+            ],
+            evidence: [
+              {
+                ref: evidenceRef,
+                kind: "test",
+                summary: `${gateType} passed through transport`,
+              },
+            ],
+          };
+          return;
+        }
+        yield {
+          kind: "completed",
+          runId: `run:${assignmentId}`,
+          occurredAt: "2026-07-30T13:04:00.000Z",
+          summary: "Independent reviewer completed the release review",
+          artifacts: [
+            {
+              name: "release-review-outcome",
+              uri: "artifact://release-review-outcome",
+              reviewOutcome: {
+                outcome: "PASSED",
+                candidateArtifactRefs:
+                  request.reviewContext?.candidateArtifactRefs ?? [],
+                findings: [],
+              },
+            },
+          ],
+          evidence: [
+            {
+              ref: "evidence://review-42",
+              kind: "review",
+              summary: "Independent Sol Reviewer passed the candidate",
+            },
+          ],
+        };
+      },
+    },
+  });
+}
 
 function event(sequence, type, occurredAt, evidenceRefs = []) {
   return {
@@ -282,7 +483,7 @@ test("Mission Flow derives lifecycle completion and evidence counts without inve
   const commands = [
     {
       type: "CAPTURE_CONTEXT",
-      payload: { context: { summary: "Versioned local Context" } },
+      payload: { context: sourceBackedContext("Versioned local Context") },
       reason: "Capture Context",
     },
     {
@@ -552,7 +753,7 @@ test("Mission Flow distinguishes changes-requested, blocked, resumed, and cancel
     });
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Control-state presentation Context" } },
+    { context: sourceBackedContext("Control-state presentation Context") },
     "Capture Context",
   );
   execute(
@@ -1012,10 +1213,11 @@ test("Approval Room traces current Evidence refs to observable summaries and sou
   );
 });
 
-test("Review Ledger derives the exact current release decision without inventing deployment", () => {
+test("Review Ledger derives the exact current release decision without inventing deployment", async () => {
   let generatedId = 0;
   const orchestrator = createMissionOrchestrator({
     eventStore: createMemoryEventStore(),
+    agentRouter: createReleaseRouter(),
     clock: () => "2026-07-30T13:00:00.000Z",
     createId: (kind) =>
       kind === "mission" ? "mission-release" : `event-${++generatedId}`,
@@ -1026,61 +1228,102 @@ test("Review Ledger derives the exact current release decision without inventing
       releaseRequired: true,
       releaseAuthorized: true,
       releaseAuthority: "release-owner",
+      mutationAuthority: "workspace-write:codex-mission-control/src",
       releasePlan: {
         residualRisk: "A failed rollout may require rollback",
         intendedExternalAction: "Deploy the approved build",
         rollbackCommitment: "Restore release 41",
+        requiredValidationGates: ["unit-tests", "integration-tests"],
       },
     },
     actor: "mission-owner",
     reason: "Create release Mission",
   });
-  const execute = (type, payload, reason, evidenceRefs = []) =>
+  const execute = (
+    type,
+    payload,
+    reason,
+    evidenceRefs = [],
+    actor = "mission-owner",
+  ) =>
     orchestrator.execute(created.id, {
       type,
       payload,
-      actor: "mission-owner",
+      actor,
       reason,
       evidenceRefs,
     });
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Release Context" } },
+    { context: sourceBackedContext("Release Context") },
     "Capture Context",
   );
   execute(
     "ACCEPT_PLAN",
-    { plan: { steps: ["build", "review", "validate"] } },
-    "Accept plan",
-  );
-  execute(
-    "START_RUN",
-    { run: { id: "run-release", agentRole: "terra_builder" } },
-    "Start run",
-  );
-  execute(
-    "SUBMIT_ARTIFACT",
     {
-      artifact: {
-        name: "release-42",
-        uri: "artifact://release-42",
-        diff: "@@ release-42 @@\n+candidate content",
+      plan: {
+        steps: ["build", "review", "validate"],
+        taskGraph: releaseTaskGraph(),
       },
     },
-    "Submit release candidate",
-    ["evidence://artifact-42"],
+    "Accept plan",
+  );
+  await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the release candidate through transport",
+  });
+  await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the declared release validation gates",
+  });
+  const reviewedMission = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the independent release reviewer",
+  });
+  const reviewer = reviewedMission.execution.nodes.find(
+    (node) => node.assignment.id === "review-release-candidate",
   );
   execute(
     "PASS_REVIEW",
-    { review: { summary: "Review passed" } },
+    {
+      review: {
+        summary: "Review passed",
+        reviewerAssignmentId: reviewer.assignment.id,
+        outcome: reviewer.reviewOutcome.outcome,
+        candidateArtifactRefs: reviewer.reviewOutcome.candidateArtifactRefs,
+        findings: reviewer.reviewOutcome.findings,
+      },
+    },
     "Pass review",
-    ["evidence://review-42"],
+    reviewer.evidenceRefs,
+    "agent:sol_reviewer",
   );
   const pendingMission = execute(
     "PASS_VALIDATION",
-    { validation: { summary: "Validation passed" } },
+    {
+      validation: {
+        summary: "Validation passed",
+        gates: [
+          {
+            type: "unit-tests",
+            status: "PASSED",
+            outcome: "PASSED",
+            evidenceRef: "evidence://validation-unit-tests",
+          },
+          {
+            type: "integration-tests",
+            status: "PASSED",
+            outcome: "PASSED",
+            evidenceRef: "evidence://validation-integration-tests",
+          },
+        ],
+      },
+    },
     "Pass validation",
-    ["evidence://validation-42"],
+    [
+      "evidence://validation-unit-tests",
+      "evidence://validation-integration-tests",
+    ],
   );
 
   const pending = deriveApprovalRoomModel(pendingMission);
@@ -1134,7 +1377,8 @@ test("Review Ledger derives the exact current release decision without inventing
         evidence: [
           "evidence://artifact-42",
           "evidence://review-42",
-          "evidence://validation-42",
+          "evidence://validation-unit-tests",
+          "evidence://validation-integration-tests",
         ],
         residualRisk: "A failed rollout may require rollback",
         intendedExternalAction: "Deploy the approved build",
@@ -1150,7 +1394,7 @@ test("Review Ledger derives the exact current release decision without inventing
         canReject: false,
         decisionHistory: [
           {
-            sequence: 8,
+            sequence: pendingMission.events.length + 1,
             type: "RELEASE_APPROVED",
             actor: "release-owner",
             reason: "Accept current residual risk",
@@ -1160,7 +1404,8 @@ test("Review Ledger derives the exact current release decision without inventing
             evidenceRefs: [
               "evidence://artifact-42",
               "evidence://review-42",
-              "evidence://validation-42",
+              "evidence://validation-unit-tests",
+              "evidence://validation-integration-tests",
             ],
           },
         ],

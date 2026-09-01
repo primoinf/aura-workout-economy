@@ -54,29 +54,283 @@ function releaseArtifact(name, uri) {
   };
 }
 
+const RELEASE_VALIDATION_GATES = Object.freeze([
+  "unit-tests",
+  "integration-tests",
+]);
+
+function releasePlan(overrides = {}) {
+  return {
+    residualRisk: "A rollback may still be required after deployment",
+    intendedExternalAction: "Deploy the approved build to production",
+    rollbackCommitment: "Restore the previous immutable release",
+    requiredValidationGates: [...RELEASE_VALIDATION_GATES],
+    ...overrides,
+  };
+}
+
+function passingReleaseValidation(overrides = {}) {
+  return {
+    summary: "Release acceptance suite passed",
+    gates: [
+      {
+        type: "unit-tests",
+        status: "PASSED",
+        outcome: "PASSED",
+        evidenceRef: "evidence://validation-release-unit",
+      },
+      {
+        type: "integration-tests",
+        status: "PASSED",
+        outcome: "PASSED",
+        evidenceRef: "evidence://validation-release-integration",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function passingReleaseValidationEvidenceRefs() {
+  return [
+    "evidence://validation-release-unit",
+    "evidence://validation-release-integration",
+  ];
+}
+
+function releaseTaskGraph() {
+  return {
+    capacity: 4,
+    coordinationRequired: true,
+    assignments: [
+      {
+        ...boundedAssignment,
+        id: "build-release-candidate",
+        goal: "Build the bounded release candidate",
+        dependsOn: [],
+        workKind: "implementation",
+        risk: "medium",
+        effectivePermission: "workspace-write",
+        ownershipBoundary: {
+          readPaths: ["codex-mission-control/src"],
+          writePaths: ["codex-mission-control/src"],
+        },
+        expectedEvidence: ["Inspectable release candidate and test Evidence"],
+      },
+      {
+        ...boundedAssignment,
+        id: "validate-release-unit",
+        goal: "Run the declared unit-tests release gate",
+        dependsOn: ["build-release-candidate"],
+        validationGateType: "unit-tests",
+        expectedEvidence: ["Transport-observed unit-tests outcome"],
+      },
+      {
+        ...boundedAssignment,
+        id: "validate-release-integration",
+        goal: "Run the declared integration-tests release gate",
+        dependsOn: ["build-release-candidate"],
+        validationGateType: "integration-tests",
+        expectedEvidence: ["Transport-observed integration-tests outcome"],
+      },
+      {
+        ...boundedAssignment,
+        id: "review-release-candidate",
+        goal: "Independently review the exact release candidate",
+        dependsOn: [
+          "validate-release-unit",
+          "validate-release-integration",
+        ],
+        workKind: "review",
+        risk: "high",
+        effectivePermission: "read-only",
+        ownershipBoundary: {
+          readPaths: ["codex-mission-control/src"],
+          writePaths: [],
+        },
+        expectedEvidence: ["Structured independent review outcome"],
+      },
+    ],
+  };
+}
+
+function createReleaseHarness(
+  eventStore = createMemoryEventStore(),
+  {
+    candidateArtifacts = [
+      releaseArtifact("release-candidate-1", "artifact://release-candidate-1"),
+    ],
+  } = {},
+) {
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run(request) {
+        const { assignment } = request;
+        yield {
+          kind: "started",
+          runId: `run:${assignment.id}`,
+          occurredAt: "2026-08-28T09:00:00.000Z",
+        };
+        if (assignment.id === "build-release-candidate") {
+          yield {
+            kind: "completed",
+            runId: `run:${assignment.id}`,
+            occurredAt: "2026-08-28T09:01:00.000Z",
+            summary: "Built the exact release candidate",
+            artifacts: structuredClone(candidateArtifacts),
+            evidence: [
+              {
+                ref: "evidence://artifact-release-1",
+                kind: "test",
+                summary: "Candidate build and tests completed",
+              },
+            ],
+          };
+          return;
+        }
+        if (assignment.validationGateType) {
+          const gateType = assignment.validationGateType;
+          const evidenceRef = `evidence://validation-release-${
+            gateType === "unit-tests" ? "unit" : "integration"
+          }`;
+          yield {
+            kind: "completed",
+            runId: `run:${assignment.id}`,
+            occurredAt: "2026-08-28T09:01:30.000Z",
+            summary: `${gateType} passed`,
+            artifacts: [
+              {
+                name: `${gateType}-validation-outcome`,
+                uri: `artifact://validation/${gateType}`,
+                validationOutcome: {
+                  type: gateType,
+                  status: "PASSED",
+                  outcome: "PASSED",
+                  evidenceRef,
+                },
+              },
+            ],
+            evidence: [
+              {
+                ref: evidenceRef,
+                kind: "test",
+                summary: `${gateType} passed through transport`,
+              },
+            ],
+          };
+          return;
+        }
+        assert.equal(assignment.id, "review-release-candidate");
+        yield {
+          kind: "completed",
+          runId: `run:${assignment.id}`,
+          occurredAt: "2026-08-28T09:02:00.000Z",
+          summary: "Independent reviewer completed the release review",
+          artifacts: [
+            {
+              name: "release-review-outcome",
+              uri: "artifact://release-review-outcome",
+              reviewOutcome: {
+                outcome: "PASSED",
+                candidateArtifactRefs: request.reviewContext.candidateArtifactRefs,
+                findings: [],
+              },
+            },
+          ],
+          evidence: [
+            {
+              ref: "evidence://review-release-1",
+              kind: "review",
+              summary: "Independent Sol Reviewer passed the candidate",
+            },
+          ],
+        };
+      },
+    },
+  });
+  return createHarness(eventStore, agentRouter);
+}
+
+const harnessEventStores = new WeakMap();
+
 function createHarness(
   eventStore = createMemoryEventStore(),
   agentRouter = undefined,
 ) {
   let eventNumber = 0;
 
-  return createMissionOrchestrator({
+  const orchestrator = createMissionOrchestrator({
     eventStore,
     agentRouter,
     clock: () => "2026-07-28T08:00:00.000Z",
     createId: (kind) =>
       kind === "mission" ? "mission-001" : `event-${++eventNumber}`,
   });
+  harnessEventStores.set(orchestrator, eventStore);
+  return orchestrator;
+}
+
+const SOURCE_BACKED_CONTEXT_SOURCES = Object.freeze([
+  {
+    kind: "workspace-rules",
+    ref: "AGENTS.md",
+    status: "available",
+  },
+  {
+    kind: "repository-state",
+    ref: "git://working-tree",
+    status: "available",
+  },
+  {
+    kind: "recent-context",
+    ref: "hotcache.md",
+    status: "available",
+  },
+  {
+    kind: "task-status",
+    ref: "task-board.md",
+    status: "available",
+  },
+  {
+    kind: "decisions",
+    ref: "docs/adr/decisions.md",
+    status: "available",
+  },
+]);
+
+function sourceBackedContext(summary) {
+  return {
+    summary,
+    capturedAt: "2026-07-28T08:00:00.000Z",
+    sources: structuredClone(SOURCE_BACKED_CONTEXT_SOURCES),
+    facts: [
+      {
+        statement: `${summary} is grounded in the current repository state.`,
+        sourceRefs: ["git://working-tree"],
+      },
+    ],
+    assumptions: [],
+  };
+}
+
+function projectedSourceBackedContext(summary, contextPackVersion) {
+  return {
+    ...sourceBackedContext(summary),
+    contextPackVersion,
+    sourceRefs: [
+      "AGENTS.md",
+      "git://working-tree",
+      "hotcache.md",
+      "task-board.md",
+      "docs/adr/decisions.md",
+    ],
+  };
 }
 
 function advanceToPlanned(orchestrator, missionId) {
   orchestrator.execute(missionId, {
     type: "CAPTURE_CONTEXT",
     payload: {
-      context: {
-        summary: "Bounded source inspection",
-        sourceRefs: ["src/mission-orchestrator.js"],
-      },
+      context: sourceBackedContext("Bounded source inspection"),
     },
     actor: "mission-owner",
     reason: "Capture the Context slice",
@@ -89,7 +343,10 @@ function advanceToPlanned(orchestrator, missionId) {
   });
 }
 
-function createCompletedPlaybookMission(orchestrator) {
+function createCompletedPlaybookMission(
+  orchestrator,
+  candidateFactory = playbookCandidateInputForMission,
+) {
   const created = orchestrator.createMission({
     brief: validBrief,
     actor: "mission-owner",
@@ -109,28 +366,93 @@ function createCompletedPlaybookMission(orchestrator) {
       reason,
       evidenceRefs,
     });
+  execute(
+    "CAPTURE_CONTEXT",
+    {
+      context: sourceBackedContext("Capture the completed Mission context"),
+    },
+    "Capture context",
+  );
+  const planned = execute(
+    "ACCEPT_PLAN",
+    { plan: { steps: ["complete the bounded Mission"] } },
+    "Accept plan",
+  );
+  const candidateInput = candidateFactory(created.id);
+  const routing = createAgentRoutingAdapter({
+    transport: { async *run() {} },
+  }).route({
+    ...boundedAssignment,
+    contextSlice: planned.context,
+  });
+  const output = playbookEvaluationTransportOutput(candidateInput);
+  const eventStore = harnessEventStores.get(orchestrator);
+  const sourceEvents = [
+    {
+      schemaVersion: 3,
+      id: "event-playbook-observation-routed",
+      missionId: created.id,
+      sequence: planned.events.length + 1,
+      type: "ASSIGNMENT_ROUTED",
+      actor: "mission-owner",
+      occurredAt: "2026-08-25T09:00:00.000Z",
+      reason: "Route the bounded Playbook observation through transport",
+      contextPackVersion: planned.contextPackVersion,
+      evidenceRefs: [],
+      data: routing,
+    },
+    {
+      schemaVersion: 3,
+      id: "event-playbook-observation-started",
+      missionId: created.id,
+      sequence: planned.events.length + 2,
+      type: "AGENT_RUN_STARTED",
+      actor: `agent:${routing.agent.roleId}`,
+      occurredAt: "2026-08-25T09:00:01.000Z",
+      reason: "Start the bounded Playbook transport observation",
+      contextPackVersion: planned.contextPackVersion,
+      evidenceRefs: [],
+      data: {
+        run: {
+          id: "run-playbook-observation",
+          status: "WORKING",
+          startedAt: "2026-08-25T09:00:01.000Z",
+          updatedAt: "2026-08-25T09:00:01.000Z",
+          summary: null,
+          modelMetadata: null,
+          evidence: [],
+        },
+      },
+    },
+    {
+      schemaVersion: 3,
+      id: "event-playbook-observation-completed",
+      missionId: created.id,
+      sequence: planned.events.length + 3,
+      type: "AGENT_RUN_COMPLETED",
+      actor: `agent:${routing.agent.roleId}`,
+      occurredAt: "2026-08-25T09:01:00.000Z",
+      reason: "Complete the bounded Playbook transport observation",
+      contextPackVersion: planned.contextPackVersion,
+      evidenceRefs: output.evidence.map((evidence) => evidence.ref),
+      data: {
+        run: {
+          id: "run-playbook-observation",
+          status: "COMPLETED",
+          startedAt: "2026-08-25T09:00:01.000Z",
+          updatedAt: "2026-08-25T09:01:00.000Z",
+          summary: "Observed the bounded Playbook evaluation results",
+          modelMetadata: null,
+          evidence: output.evidence,
+        },
+        artifacts: output.artifacts,
+      },
+    },
+  ];
+  eventStore.append(created.id, sourceEvents, {
+    expectedSequence: planned.events.length,
+  });
   const completionCommands = [
-    [
-      "CAPTURE_CONTEXT",
-      { context: { summary: "Capture the completed Mission context" } },
-      "Capture context",
-    ],
-    [
-      "ACCEPT_PLAN",
-      { plan: { steps: ["complete the bounded Mission"] } },
-      "Accept plan",
-    ],
-    [
-      "START_RUN",
-      { run: { id: "run-playbook", agentRole: "terra_builder" } },
-      "Start run",
-    ],
-    [
-      "SUBMIT_ARTIFACT",
-      { artifact: { uri: "artifact://playbook-source" } },
-      "Submit artifact",
-      ["evidence://playbook-artifact"],
-    ],
     [
       "PASS_REVIEW",
       { review: { summary: "Mission review passed" } },
@@ -160,7 +482,13 @@ function createCompletedPlaybookMission(orchestrator) {
   for (const [type, payload, reason, evidenceRefs] of completionCommands) {
     completed = execute(type, payload, reason, evidenceRefs);
   }
-  return { created, completed, execute };
+  return {
+    candidateInput,
+    created,
+    completed,
+    execute,
+    sourceEvent: sourceEvents.at(-1),
+  };
 }
 
 function playbookCandidateInputForMission(missionId) {
@@ -199,6 +527,34 @@ function playbookCandidateInputForMission(missionId) {
       protectedConfiguration: structuredClone(protectedConfiguration),
       metrics: structuredClone(baselineMetrics),
       criticalRegressionCaseIds: [],
+      caseResults: [
+        {
+          caseId: "case:retry-evidence",
+          artifactRef: "artifact://playbook/baseline/1/case-retry-evidence",
+          evidenceRefs: [
+            "evidence://playbook/baseline/1/case-retry-evidence",
+          ],
+          acceptanceScore: 0.8,
+          criticalRegression: false,
+          reviewFindings: 2,
+          retries: 3,
+          cycleTimeMs: 60000,
+          tokenUse: 5000,
+        },
+        {
+          caseId: "case:review-handoff",
+          artifactRef: "artifact://playbook/baseline/1/case-review-handoff",
+          evidenceRefs: [
+            "evidence://playbook/baseline/1/case-review-handoff",
+          ],
+          acceptanceScore: 0.8,
+          criticalRegression: false,
+          reviewFindings: 2,
+          retries: 2,
+          cycleTimeMs: 60000,
+          tokenUse: 5000,
+        },
+      ],
     },
     candidate: {
       id: "playbook:retry-guidance",
@@ -219,6 +575,34 @@ function playbookCandidateInputForMission(missionId) {
         tokenUse: 9000,
       },
       criticalRegressionCaseIds: [],
+      caseResults: [
+        {
+          caseId: "case:retry-evidence",
+          artifactRef: "artifact://playbook/candidate/2/case-retry-evidence",
+          evidenceRefs: [
+            "evidence://playbook/candidate/2/case-retry-evidence",
+          ],
+          acceptanceScore: 0.9,
+          criticalRegression: false,
+          reviewFindings: 1,
+          retries: 1,
+          cycleTimeMs: 50000,
+          tokenUse: 4500,
+        },
+        {
+          caseId: "case:review-handoff",
+          artifactRef: "artifact://playbook/candidate/2/case-review-handoff",
+          evidenceRefs: [
+            "evidence://playbook/candidate/2/case-review-handoff",
+          ],
+          acceptanceScore: 0.9,
+          criticalRegression: false,
+          reviewFindings: 1,
+          retries: 2,
+          cycleTimeMs: 50000,
+          tokenUse: 4500,
+        },
+      ],
     },
     declaredTarget: {
       metric: "acceptancePassRate",
@@ -226,6 +610,428 @@ function playbookCandidateInputForMission(missionId) {
     },
   };
 }
+
+// Production break caught: accepting caller-authored Playbook evaluation facts
+// that have no transport-observed Mission provenance.
+test("Playbook evaluation rejects caller-authored facts without transport-observed provenance", () => {
+  const orchestrator = createHarness();
+  const { created, execute } = createCompletedPlaybookMission(orchestrator);
+  const eventsBefore = orchestrator.getMission(created.id).events.length;
+
+  assert.throws(
+    () =>
+      execute(
+        "EVALUATE_PLAYBOOK_CANDIDATE",
+        { candidate: playbookCandidateInputForMission(created.id) },
+        "Attempt to persist caller-authored Playbook facts",
+      ),
+    /Playbook evaluation .*caller-authored facts/i,
+  );
+  assert.equal(
+    orchestrator.getMission(created.id).events.length,
+    eventsBefore,
+  );
+});
+
+function playbookEvaluationTransportOutput(candidateInput) {
+  const caseResults = [
+    ...candidateInput.baseline.caseResults,
+    ...candidateInput.candidate.caseResults,
+  ];
+  const evidenceRefs = [
+    ...candidateInput.retrospective.evidenceRefs,
+    ...caseResults.flatMap((result) => result.evidenceRefs),
+  ];
+  return {
+    artifacts: [
+      {
+        name: "playbook-evaluation-source",
+        uri: "artifact://playbook-evaluation-source",
+        playbookEvaluation: {
+          schemaVersion: 1,
+          ...structuredClone(candidateInput),
+        },
+      },
+      ...caseResults.map((result) => ({
+        name: `playbook-case-${result.caseId}`,
+        uri: result.artifactRef,
+        summary: `Observed result for ${result.caseId}`,
+      })),
+    ],
+    evidence: evidenceRefs.map((ref) => ({
+      ref,
+      kind: "evaluation",
+      summary: `Observed Playbook evaluation Evidence ${ref}`,
+    })),
+  };
+}
+
+function playbookEvaluationSourceSelector(sourceEvent) {
+  return {
+    eventId: sourceEvent.id,
+    assignmentId: boundedAssignment.id,
+    runId: sourceEvent.data.run.id,
+    artifactRef: "artifact://playbook-evaluation-source",
+  };
+}
+
+async function createTransportObservedCompletedPlaybookMission(
+  candidateFactory = playbookCandidateInputForMission,
+  outputFactory = playbookEvaluationTransportOutput,
+) {
+  let candidateInput;
+  const agentRouter = createAgentRoutingAdapter({
+    transport: {
+      async *run() {
+        yield {
+          kind: "started",
+          runId: "run-playbook-observation",
+          occurredAt: "2026-08-25T09:00:00.000Z",
+        };
+        const output = outputFactory(candidateInput);
+        yield {
+          kind: "completed",
+          runId: "run-playbook-observation",
+          occurredAt: "2026-08-25T09:01:00.000Z",
+          summary: "Observed the bounded Playbook evaluation results",
+          ...output,
+        };
+      },
+    },
+  });
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createHarness(eventStore, agentRouter);
+  const created = orchestrator.createMission({
+    brief: validBrief,
+    actor: "mission-owner",
+    reason: "Create a Mission with transport-observed Playbook evaluation output",
+  });
+  advanceToPlanned(orchestrator, created.id);
+  candidateInput = candidateFactory(created.id);
+  await orchestrator.dispatchAssignment(created.id, {
+    assignment: boundedAssignment,
+    actor: "mission-owner",
+    reason: "Observe the bounded Playbook evaluation through transport",
+  });
+  const execute = (
+    type,
+    payload,
+    reason,
+    evidenceRefs = [],
+    actor = "mission-owner",
+  ) =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor,
+      reason,
+      evidenceRefs,
+    });
+  execute(
+    "PASS_REVIEW",
+    { review: { summary: "Mission review passed" } },
+    "Pass the Mission review",
+    ["evidence://transport-playbook-review"],
+  );
+  execute(
+    "PASS_VALIDATION",
+    { validation: { summary: "Mission validation passed" } },
+    "Pass the Mission validation",
+    ["evidence://transport-playbook-validation"],
+  );
+  execute(
+    "CAPTURE_LEARNING",
+    { learning: { summary: "Record the observed Playbook outcome" } },
+    "Capture the Mission learning",
+    ["evidence://transport-playbook-learning"],
+  );
+  const completed = execute(
+    "COMPLETE_NO_RELEASE",
+    { completion: { summary: "Complete the Mission" } },
+    "Complete the Mission after observed evaluation",
+    ["evidence://transport-playbook-completion"],
+  );
+  const sourceEvent = completed.events.find(
+    (event) => event.type === "AGENT_RUN_COMPLETED",
+  );
+  return {
+    candidateInput,
+    completed,
+    created,
+    eventStore,
+    execute,
+    orchestrator,
+    sourceEvent,
+  };
+}
+
+test("Playbook evaluation derives stored facts from one transport-observed structured Artifact", async () => {
+  const {
+    candidateInput,
+    created,
+    execute,
+    sourceEvent,
+  } = await createTransportObservedCompletedPlaybookMission();
+
+  const evaluated = execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: { source: playbookEvaluationSourceSelector(sourceEvent) } },
+    "Evaluate only the current transport-observed Playbook output",
+  );
+  const evaluationEvent = evaluated.events.at(-1);
+
+  assert.deepEqual(evaluated.playbook.retrospective, candidateInput.retrospective);
+  assert.deepEqual(evaluated.playbook.baseline, candidateInput.baseline);
+  assert.deepEqual(evaluated.playbook.candidate, candidateInput.candidate);
+  assert.deepEqual(evaluationEvent.data.candidate, candidateInput);
+  assert.deepEqual(evaluationEvent.data.evaluation, {
+    schemaVersion: 1,
+    missionId: created.id,
+    contextPackVersion: 1,
+    source: {
+      eventId: sourceEvent.id,
+      eventSequence: sourceEvent.sequence,
+      eventType: "AGENT_RUN_COMPLETED",
+      assignmentId: boundedAssignment.id,
+      runId: "run-playbook-observation",
+      artifactRef: "artifact://playbook-evaluation-source",
+    },
+  });
+  assert.deepEqual(
+    evaluationEvent.evidenceRefs,
+    playbookEvaluationTransportOutput(candidateInput).evidence.map(
+      (evidence) => evidence.ref,
+    ),
+  );
+});
+
+test("Playbook evaluation auto-selection fails closed without exactly one transport-observed structured Artifact", async () => {
+  const noEvaluation = await createTransportObservedCompletedPlaybookMission(
+    playbookCandidateInputForMission,
+    (candidateInput) => {
+      const output = playbookEvaluationTransportOutput(candidateInput);
+      output.artifacts = output.artifacts.slice(1);
+      return output;
+    },
+  );
+  const noEvaluationEventsBefore = noEvaluation.orchestrator.getMission(
+    noEvaluation.created.id,
+  ).events.length;
+  assert.throws(
+    () =>
+      noEvaluation.execute(
+        "EVALUATE_PLAYBOOK_CANDIDATE",
+        { candidate: {} },
+        "Reject the absence of a transport-observed evaluation Artifact",
+      ),
+    /exactly one current transport-observed structured Artifact/,
+  );
+  assert.equal(
+    noEvaluation.orchestrator.getMission(noEvaluation.created.id).events.length,
+    noEvaluationEventsBefore,
+  );
+
+  const multipleEvaluations = await createTransportObservedCompletedPlaybookMission(
+    playbookCandidateInputForMission,
+    (candidateInput) => {
+      const output = playbookEvaluationTransportOutput(candidateInput);
+      output.artifacts.unshift({
+        ...structuredClone(output.artifacts[0]),
+        name: "duplicate-playbook-evaluation-source",
+        uri: "artifact://duplicate-playbook-evaluation-source",
+      });
+      return output;
+    },
+  );
+  const multipleEvaluationEventsBefore =
+    multipleEvaluations.orchestrator.getMission(
+      multipleEvaluations.created.id,
+    ).events.length;
+  assert.throws(
+    () =>
+      multipleEvaluations.execute(
+        "EVALUATE_PLAYBOOK_CANDIDATE",
+        { candidate: {} },
+        "Reject ambiguous transport-observed evaluation Artifacts",
+      ),
+    /exactly one current transport-observed structured Artifact/,
+  );
+  assert.equal(
+    multipleEvaluations.orchestrator.getMission(
+      multipleEvaluations.created.id,
+    ).events.length,
+    multipleEvaluationEventsBefore,
+  );
+});
+
+test("Playbook evaluation rejects case references outside the selected transport-observed output", async () => {
+  const scenarios = [
+    {
+      name: "an unobserved case Artifact",
+      mutate(output) {
+        output.artifacts[0].playbookEvaluation.baseline.caseResults[0].artifactRef =
+          "artifact://pasted-case-observation";
+      },
+    },
+    {
+      name: "an unobserved case Evidence reference",
+      mutate(output) {
+        output.artifacts[0].playbookEvaluation.candidate.caseResults[0].evidenceRefs = [
+          "evidence://pasted-case-observation",
+        ];
+      },
+    },
+    {
+      name: "a duplicate case Artifact reference",
+      mutate(output) {
+        output.artifacts[0].playbookEvaluation.candidate.caseResults[0].artifactRef =
+          output.artifacts[0].playbookEvaluation.baseline.caseResults[0].artifactRef;
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const observedMission =
+      await createTransportObservedCompletedPlaybookMission(
+        playbookCandidateInputForMission,
+        (candidateInput) => {
+          const output = playbookEvaluationTransportOutput(candidateInput);
+          scenario.mutate(output);
+          return output;
+        },
+      );
+    const eventsBefore = observedMission.orchestrator.getMission(
+      observedMission.created.id,
+    ).events.length;
+    assert.throws(
+      () =>
+        observedMission.execute(
+          "EVALUATE_PLAYBOOK_CANDIDATE",
+          { candidate: {} },
+          `Reject ${scenario.name}`,
+        ),
+      /case Artifacts and Evidence must resolve|case Artifact references must be distinct/i,
+    );
+    assert.equal(
+      observedMission.orchestrator.getMission(observedMission.created.id)
+        .events.length,
+      eventsBefore,
+    );
+  }
+});
+
+test("Playbook evaluation rejects pasted claims and forged transport-observed selectors without appending", async () => {
+  const {
+    candidateInput,
+    created,
+    execute,
+    orchestrator,
+    sourceEvent,
+  } = await createTransportObservedCompletedPlaybookMission();
+  const source = playbookEvaluationSourceSelector(sourceEvent);
+  const scenarios = [
+    {
+      name: "pasted metrics",
+      payload: { candidate: { metrics: candidateInput.candidate.metrics } },
+    },
+    {
+      name: "pasted case results",
+      payload: {
+        candidate: {
+          caseResults: candidateInput.candidate.caseResults,
+        },
+      },
+    },
+    {
+      name: "pasted retrospective Evidence",
+      payload: {
+        candidate: {
+          retrospective: {
+            evidenceRefs: ["evidence://pasted-retrospective"],
+          },
+        },
+      },
+    },
+    {
+      name: "pasted Mission ID",
+      payload: { candidate: { missionId: "mission-other" } },
+    },
+    {
+      name: "forged source Artifact",
+      payload: {
+        candidate: {
+          source: {
+            ...source,
+            artifactRef: "artifact://pasted-source",
+          },
+        },
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const eventsBefore = orchestrator.getMission(created.id).events.length;
+    assert.throws(
+      () =>
+        execute(
+          "EVALUATE_PLAYBOOK_CANDIDATE",
+          scenario.payload,
+          `Attempt ${scenario.name}`,
+        ),
+      /Playbook evaluation/i,
+      scenario.name,
+    );
+    assert.equal(
+      orchestrator.getMission(created.id).events.length,
+      eventsBefore,
+      `${scenario.name} must not append an evaluation event`,
+    );
+  }
+});
+
+test("Playbook evaluation replay rejects forged transport-observed provenance and snapshots", async () => {
+  const {
+    created,
+    eventStore,
+    execute,
+    sourceEvent,
+  } = await createTransportObservedCompletedPlaybookMission();
+  const evaluated = execute(
+    "EVALUATE_PLAYBOOK_CANDIDATE",
+    { candidate: { source: playbookEvaluationSourceSelector(sourceEvent) } },
+    "Persist the current observed evaluation",
+  );
+  const mutateEvaluation = (mutator) => {
+    const events = structuredClone(evaluated.events);
+    mutator(events.at(-1));
+    return createHarness(
+      createMemoryEventStore({ [created.id]: events }),
+    );
+  };
+
+  for (const mutate of [
+    (event) => {
+      event.data.candidate.candidate.metrics.tokenUse += 1;
+    },
+    (event) => {
+      event.data.candidate.retrospective.evidenceRefs = [
+        "evidence://forged-retrospective",
+      ];
+    },
+    (event) => {
+      event.data.evaluation.missionId = "mission-other";
+    },
+    (event) => {
+      event.data.evaluation.source.artifactRef = "artifact://forged-source";
+    },
+  ]) {
+    assert.throws(
+      () => mutateEvaluation(mutate).getMission(created.id),
+      /Playbook|transport-observed/i,
+    );
+  }
+  assert.deepEqual(eventStore.load(created.id), evaluated.events);
+});
 
 function independentPlaybookReview(candidateInput, overrides = {}) {
   return {
@@ -271,27 +1077,71 @@ function dispatchPlaybookReview(orchestrator, missionId) {
   });
 }
 
-function createReleaseMissionAtApproval(
+function createLegacyReleaseMissionInReview(orchestrator) {
+  const created = orchestrator.createMission({
+    brief: {
+      ...validBrief,
+      releaseRequired: true,
+      releaseAuthorized: true,
+      releaseAuthority: "release-owner",
+      releasePlan: releasePlan(),
+    },
+    actor: "mission-owner",
+    reason: "Start a legacy release Mission for a fail-closed check",
+  });
+  const execute = (
+    type,
+    payload,
+    reason,
+    evidenceRefs = [],
+    actor = "mission-owner",
+  ) =>
+    orchestrator.execute(created.id, {
+      type,
+      payload,
+      actor,
+      reason,
+      evidenceRefs,
+    });
+  execute(
+    "CAPTURE_CONTEXT",
+    { context: sourceBackedContext("Release Context Pack") },
+    "Capture release Context",
+  );
+  execute(
+    "ACCEPT_PLAN",
+    { plan: { steps: ["build", "review", "validate", "approve"] } },
+    "Accept legacy release plan",
+  );
+  execute(
+    "START_RUN",
+    { run: { id: "run-release-1", agentRole: "terra_builder" } },
+    "Start release candidate",
+  );
+  execute(
+    "SUBMIT_ARTIFACT",
+    {
+      artifact: releaseArtifact(
+        "release-candidate-1",
+        "artifact://release-candidate-1",
+      ),
+    },
+    "Submit exact release candidate",
+    ["evidence://artifact-release-1"],
+  );
+  return { created, execute };
+}
+
+async function createReleaseMissionAtApproval(
   orchestrator,
-  {
-    artifact = releaseArtifact(
-      "release-candidate-1",
-      "artifact://release-candidate-1",
-    ),
-    stopBeforeReview = false,
-    stopBeforeValidation = false,
-  } = {},
+  { stopBeforeReview = false, stopBeforeValidation = false } = {},
 ) {
   const releaseBrief = {
     ...validBrief,
     releaseRequired: true,
     releaseAuthorized: true,
     releaseAuthority: "release-owner",
-    releasePlan: {
-      residualRisk: "A rollback may still be required after deployment",
-      intendedExternalAction: "Deploy the approved build to production",
-      rollbackCommitment: "Restore the previous immutable release",
-    },
+    releasePlan: releasePlan(),
   };
   const created = orchestrator.createMission({
     brief: releaseBrief,
@@ -314,44 +1164,83 @@ function createReleaseMissionAtApproval(
     });
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Release Context Pack" } },
+    { context: sourceBackedContext("Release Context Pack") },
     "Capture release Context",
   );
   execute(
     "ACCEPT_PLAN",
-    { plan: { steps: ["build", "review", "validate", "approve"] } },
-    "Accept release plan",
+    {
+      plan: {
+        steps: ["build", "review", "validate", "approve"],
+        taskGraph: releaseTaskGraph(),
+      },
+    },
+    "Accept release plan with independent review",
   );
-  execute(
-    "START_RUN",
-    { run: { id: "run-release-1", agentRole: "terra_builder" } },
-    "Start release candidate",
-  );
-  execute(
-    "SUBMIT_ARTIFACT",
-    { artifact },
-    "Submit exact release candidate",
-    ["evidence://artifact-release-1"],
+  await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the candidate build through the transport",
+  });
+  await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the declared release validation gates through transport",
+  });
+  const reviewed = await orchestrator.dispatchExecutionWave(created.id, {
+    actor: "mission-owner",
+    reason: "Dispatch the independent reviewer through the transport",
+  });
+  const reviewer = reviewed.execution.nodes.find(
+    (node) => node.assignment.id === "review-release-candidate",
   );
   if (!stopBeforeReview) {
     execute(
       "PASS_REVIEW",
-      { review: { summary: "Independent review passed" } },
-      "Pass independent review",
-      ["evidence://review-release-1"],
+      {
+        review: {
+          summary: "Independent review passed",
+          reviewerAssignmentId: reviewer.assignment.id,
+          outcome: reviewer.reviewOutcome.outcome,
+          candidateArtifactRefs: reviewer.reviewOutcome.candidateArtifactRefs,
+          findings: reviewer.reviewOutcome.findings,
+        },
+      },
+      "Record the transport-observed independent review",
+      reviewer.evidenceRefs,
+      "agent:sol_reviewer",
     );
   }
   return {
     created,
     execute,
-    approvalRequired: stopBeforeReview || stopBeforeValidation
-      ? null
-      : execute(
-          "PASS_VALIDATION",
-          { validation: { summary: "Release acceptance suite passed" } },
-          "Pass release validation",
-          ["evidence://validation-release-1"],
-        ),
+    reviewed,
+    approvalRequired:
+      stopBeforeReview || stopBeforeValidation
+        ? null
+        : execute(
+            "PASS_VALIDATION",
+            { validation: passingReleaseValidation() },
+            "Record every required release validation gate",
+            passingReleaseValidationEvidenceRefs(),
+          ),
+  };
+}
+
+function expectedReleaseReadiness(candidateArtifacts) {
+  return {
+    candidate: candidateArtifacts[0],
+    candidateArtifacts,
+    contextPackVersion: 1,
+    evidenceRefs: [
+      "evidence://artifact-release-1",
+      "evidence://review-release-1",
+      ...passingReleaseValidationEvidenceRefs(),
+    ],
+    validation: {
+      summary: "Release acceptance suite passed",
+      gates: passingReleaseValidation().gates,
+      evidenceRefs: passingReleaseValidationEvidenceRefs(),
+    },
+    ...releasePlan(),
   };
 }
 
@@ -400,7 +1289,7 @@ test("mission owner can create a Mission from a valid Brief", () => {
     },
     events: [
       {
-        schemaVersion: 2,
+        schemaVersion: 3,
         id: "event-1",
         missionId: "mission-001",
         sequence: 1,
@@ -439,11 +1328,7 @@ test("release-required Brief is accepted only with an explicit bounded release p
     releaseRequired: true,
     releaseAuthorized: true,
     releaseAuthority: "release-owner",
-    releasePlan: {
-      residualRisk: "A rollback may still be required after deployment",
-      intendedExternalAction: "Deploy the approved build to production",
-      rollbackCommitment: "Restore the previous immutable release",
-    },
+    releasePlan: releasePlan(),
   };
   assert.throws(
     () =>
@@ -501,70 +1386,35 @@ test("release-required Brief is accepted only with an explicit bounded release p
   );
 });
 
-test("current passing gates move a release-required Mission into human approval", () => {
+test("release-required Brief declares the typed validation gates needed for approval", () => {
   const orchestrator = createHarness();
-  const releaseBrief = {
-    ...validBrief,
-    releaseRequired: true,
-    releaseAuthorized: true,
-    releaseAuthority: "release-owner",
-    releasePlan: {
-      residualRisk: "A rollback may still be required after deployment",
-      intendedExternalAction: "Deploy the approved build to production",
-      rollbackCommitment: "Restore the previous immutable release",
-    },
-  };
-  const created = orchestrator.createMission({
-    brief: releaseBrief,
-    actor: "mission-owner",
-    reason: "Start a release Mission that requires human approval",
-  });
-  const execute = (type, payload, reason, evidenceRefs = []) =>
-    orchestrator.execute(created.id, {
-      type,
-      payload,
-      actor: "mission-owner",
-      reason,
-      evidenceRefs,
-    });
 
-  execute(
-    "CAPTURE_CONTEXT",
-    { context: { summary: "Release Context Pack" } },
-    "Capture release Context",
+  assert.throws(
+    () =>
+      orchestrator.createMission({
+        brief: {
+          ...validBrief,
+          releaseRequired: true,
+          releaseAuthorized: true,
+          releaseAuthority: "release-owner",
+          releasePlan: {
+            residualRisk: "A rollback may still be required after deployment",
+            intendedExternalAction: "Deploy the approved build to production",
+            rollbackCommitment: "Restore the previous immutable release",
+          },
+        },
+        actor: "mission-owner",
+        reason: "Attempt release without declared validation gates",
+      }),
+    /Release-required Brief requires unique validation gate types/,
   );
-  execute(
-    "ACCEPT_PLAN",
-    { plan: { steps: ["build", "review", "validate", "approve"] } },
-    "Accept release plan",
-  );
-  execute(
-    "START_RUN",
-    { run: { id: "run-release-1", agentRole: "terra_builder" } },
-    "Start release candidate",
-  );
-  execute(
-    "SUBMIT_ARTIFACT",
-    {
-      artifact: releaseArtifact(
-        "release-candidate-1",
-        "artifact://release-candidate-1",
-      ),
-    },
-    "Submit exact release candidate",
-    ["evidence://artifact-release-1"],
-  );
-  execute(
-    "PASS_REVIEW",
-    { review: { summary: "Independent review passed" } },
-    "Pass independent review",
-    ["evidence://review-release-1"],
-  );
-  const approvalRequired = execute(
-    "PASS_VALIDATION",
-    { validation: { summary: "Release acceptance suite passed" } },
-    "Pass release validation",
-    ["evidence://validation-release-1"],
+  assert.deepEqual(orchestrator.listMissions(), []);
+});
+
+test("current transport-observed review and typed gates move a release-required Mission into human approval", async () => {
+  const orchestrator = createReleaseHarness();
+  const { approvalRequired, reviewed } = await createReleaseMissionAtApproval(
+    orchestrator,
   );
 
   assert.deepEqual(
@@ -576,28 +1426,9 @@ test("current passing gates move a release-required Mission into human approval"
     },
     {
       status: "APPROVAL_REQUIRED",
-      releaseReadiness: {
-        candidate: releaseArtifact(
-          "release-candidate-1",
-          "artifact://release-candidate-1",
-        ),
-        candidateArtifacts: [
-          releaseArtifact(
-            "release-candidate-1",
-            "artifact://release-candidate-1",
-          ),
-        ],
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        residualRisk:
-          "A rollback may still be required after deployment",
-        intendedExternalAction: "Deploy the approved build to production",
-        rollbackCommitment: "Restore the previous immutable release",
-      },
+      releaseReadiness: expectedReleaseReadiness([
+        releaseArtifact("release-candidate-1", "artifact://release-candidate-1"),
+      ]),
       allowedActions: [
         "approve_release",
         "reject_release",
@@ -608,15 +1439,228 @@ test("current passing gates move a release-required Mission into human approval"
       latestEventType: "VALIDATION_PASSED",
     },
   );
+  assert.deepEqual(
+    reviewed.execution.nodes.find(
+      (node) => node.assignment.id === "review-release-candidate",
+    ).agent,
+    {
+      roleId: "sol_reviewer",
+      roleName: "Sol Reviewer",
+      capability: "review",
+      effectivePermission: "read-only",
+      independent: true,
+    },
+  );
 });
 
-test("release validation fails closed when a candidate has no inspectable detail", () => {
+test("release-required Mission without a Task Graph cannot self-certify review", () => {
   const orchestrator = createHarness();
-  const { created, execute } = createReleaseMissionAtApproval(orchestrator, {
-    artifact: {
-      name: "opaque-release-candidate",
-      uri: "artifact://opaque-release-candidate",
+  const { created, execute } = createLegacyReleaseMissionInReview(orchestrator);
+  const eventCount = orchestrator.getMission(created.id).events.length;
+
+  assert.throws(
+    () =>
+      execute(
+        "PASS_REVIEW",
+        { review: { summary: "Mission owner claims review passed" } },
+        "Attempt an owner-authored release review",
+        ["evidence://owner-authored-review"],
+      ),
+    /release-required review requires transport-bound independent reviewer Evidence/,
+  );
+  assert.equal(orchestrator.getMission(created.id).events.length, eventCount);
+  assert.equal(orchestrator.getMission(created.id).status, "IN_REVIEW");
+});
+
+test("release Plan requires one validation Assignment per declared gate", () => {
+  const orchestrator = createHarness();
+  const created = orchestrator.createMission({
+    brief: {
+      ...validBrief,
+      releaseRequired: true,
+      releaseAuthorized: true,
+      releaseAuthority: "release-owner",
+      releasePlan: releasePlan(),
     },
+    actor: "mission-owner",
+    reason: "Start a release Mission",
+  });
+  orchestrator.execute(created.id, {
+    type: "CAPTURE_CONTEXT",
+    payload: { context: sourceBackedContext("Release Context Pack") },
+    actor: "mission-owner",
+    reason: "Capture release Context",
+  });
+  const graphWithoutValidation = releaseTaskGraph();
+  graphWithoutValidation.assignments = graphWithoutValidation.assignments
+    .filter((assignment) => assignment.validationGateType === undefined)
+    .map((assignment) =>
+      assignment.id === "review-release-candidate"
+        ? { ...assignment, dependsOn: ["build-release-candidate"] }
+        : assignment,
+    );
+
+  assert.throws(
+    () =>
+      orchestrator.execute(created.id, {
+        type: "ACCEPT_PLAN",
+        payload: {
+          plan: {
+            steps: ["build", "review", "validate"],
+            taskGraph: graphWithoutValidation,
+          },
+        },
+        actor: "mission-owner",
+        reason: "Attempt a release Plan without validation work",
+      }),
+    /one validation Assignment per declared gate/i,
+  );
+});
+
+test("release validation rejects missing, extra, and duplicate declared gate types", async () => {
+  const runValidation = async (validation, evidenceRefs) => {
+    const orchestrator = createReleaseHarness();
+    const { created, execute } = await createReleaseMissionAtApproval(
+      orchestrator,
+      { stopBeforeValidation: true },
+    );
+    const eventCount = orchestrator.getMission(created.id).events.length;
+    return {
+      execute: () =>
+        execute(
+          "PASS_VALIDATION",
+          { validation },
+          "Attempt an incomplete or non-exact release validation",
+          evidenceRefs,
+        ),
+      eventCount,
+      orchestrator,
+      missionId: created.id,
+    };
+  };
+
+  const missing = await runValidation(
+    {
+      ...passingReleaseValidation(),
+      gates: [passingReleaseValidation().gates[0]],
+    },
+    ["evidence://validation-release-unit"],
+  );
+  assert.throws(missing.execute, /exact declared validation gate types/);
+  assert.equal(
+    missing.orchestrator.getMission(missing.missionId).events.length,
+    missing.eventCount,
+  );
+
+  const extra = await runValidation(
+    {
+      ...passingReleaseValidation(),
+      gates: [
+        ...passingReleaseValidation().gates,
+        {
+          type: "browser-smoke",
+          status: "PASSED",
+          outcome: "PASSED",
+          evidenceRef: "evidence://validation-release-browser",
+        },
+      ],
+    },
+    [
+      ...passingReleaseValidationEvidenceRefs(),
+      "evidence://validation-release-browser",
+    ],
+  );
+  assert.throws(extra.execute, /exact declared validation gate types/);
+
+  const duplicate = await runValidation(
+    {
+      ...passingReleaseValidation(),
+      gates: [
+        passingReleaseValidation().gates[0],
+        {
+          ...passingReleaseValidation().gates[0],
+          evidenceRef: "evidence://validation-release-unit-duplicate",
+        },
+      ],
+    },
+    [
+      "evidence://validation-release-unit",
+      "evidence://validation-release-unit-duplicate",
+    ],
+  );
+  assert.throws(duplicate.execute, /exact declared validation gate types/);
+});
+
+test("release validation rejects non-passing and unbound typed gate Evidence", async () => {
+  const runValidation = async (validation, evidenceRefs) => {
+    const orchestrator = createReleaseHarness();
+    const { execute } = await createReleaseMissionAtApproval(orchestrator, {
+      stopBeforeValidation: true,
+    });
+    return () =>
+      execute(
+        "PASS_VALIDATION",
+        { validation },
+        "Attempt a non-passing or Evidence-unbound release validation",
+        evidenceRefs,
+      );
+  };
+
+  assert.throws(
+    await runValidation(
+      {
+        ...passingReleaseValidation(),
+        gates: [
+          {
+            ...passingReleaseValidation().gates[0],
+            outcome: "FAILED",
+          },
+          passingReleaseValidation().gates[1],
+        ],
+      },
+      passingReleaseValidationEvidenceRefs(),
+    ),
+    /non-passing validation gate outcome/,
+  );
+
+  assert.throws(
+    await runValidation(
+      {
+        ...passingReleaseValidation(),
+        gates: [
+          {
+            ...passingReleaseValidation().gates[0],
+            evidenceRef: "evidence://forged-validation-unit",
+          },
+          passingReleaseValidation().gates[1],
+        ],
+      },
+      passingReleaseValidationEvidenceRefs(),
+    ),
+    /typed validation gate Evidence must exactly match event Evidence/,
+  );
+
+  assert.throws(
+    await runValidation(
+      {
+        ...passingReleaseValidation(),
+        gates: [
+          passingReleaseValidation().gates[0],
+          {
+            ...passingReleaseValidation().gates[1],
+            evidenceRef: "evidence://validation-release-unit",
+          },
+        ],
+      },
+      passingReleaseValidationEvidenceRefs(),
+    ),
+    /typed validation gate Evidence must exactly match event Evidence/,
+  );
+});
+
+test("release validation rejects self-consistent gate refs that transport never observed", async () => {
+  const orchestrator = createReleaseHarness();
+  const { execute } = await createReleaseMissionAtApproval(orchestrator, {
     stopBeforeValidation: true,
   });
 
@@ -624,9 +1668,45 @@ test("release validation fails closed when a candidate has no inspectable detail
     () =>
       execute(
         "PASS_VALIDATION",
-        { validation: { summary: "Release acceptance suite passed" } },
+        {
+          validation: {
+            ...passingReleaseValidation(),
+            gates: passingReleaseValidation().gates.map((gate) => ({
+              ...gate,
+              evidenceRef: `${gate.evidenceRef}-invented`,
+            })),
+          },
+        },
+        "Attempt to self-certify validation with invented Evidence",
+        passingReleaseValidationEvidenceRefs().map(
+          (reference) => `${reference}-invented`,
+        ),
+      ),
+    /transport-observed validation gate Evidence/,
+  );
+});
+
+test("release validation fails closed when a candidate has no inspectable detail", async () => {
+  const orchestrator = createReleaseHarness(createMemoryEventStore(), {
+    candidateArtifacts: [
+      {
+        name: "opaque-release-candidate",
+        uri: "artifact://opaque-release-candidate",
+      },
+    ],
+  });
+  const { created, execute } = await createReleaseMissionAtApproval(
+    orchestrator,
+    { stopBeforeValidation: true },
+  );
+
+  assert.throws(
+    () =>
+      execute(
+        "PASS_VALIDATION",
+        { validation: passingReleaseValidation() },
         "Pass release validation",
-        ["evidence://validation-release-1"],
+        passingReleaseValidationEvidenceRefs(),
       ),
     /release-required candidate Artifacts must include inline diff, patch, or content before approval/,
   );
@@ -635,34 +1715,38 @@ test("release validation fails closed when a candidate has no inspectable detail
   assert.equal(mission.status, "VALIDATING");
   assert.equal(mission.events.at(-1).type, "REVIEW_PASSED");
 
-  const referenceOrchestrator = createHarness();
-  const { execute: executeReference } = createReleaseMissionAtApproval(
-    referenceOrchestrator,
-    {
-      artifact: {
+  const referenceOrchestrator = createReleaseHarness(createMemoryEventStore(), {
+    candidateArtifacts: [
+      {
         name: "reference-only-release-candidate",
         uri: "artifact://reference-only-release-candidate",
         diff: "src/release-candidate.diff",
       },
-      stopBeforeValidation: true,
-    },
+    ],
+  });
+  const { execute: executeReference } = await createReleaseMissionAtApproval(
+    referenceOrchestrator,
+    { stopBeforeValidation: true },
   );
   assert.throws(
     () =>
       executeReference(
         "PASS_VALIDATION",
-        { validation: { summary: "Release acceptance suite passed" } },
+        { validation: passingReleaseValidation() },
         "Pass release validation with a reference-only diff",
-        ["evidence://validation-release-1"],
+        passingReleaseValidationEvidenceRefs(),
       ),
     /release-required candidate Artifacts must include inline diff, patch, or content before approval/,
   );
 });
 
-test("passing release gates reject explicit failed outcomes and reused Evidence", () => {
-  const reviewOrchestrator = createHarness();
-  const { created: reviewMission, execute: executeReview } =
-    createReleaseMissionAtApproval(reviewOrchestrator, {
+test("passing release gates reject explicit failed outcomes and reused Evidence", async () => {
+  const reviewOrchestrator = createReleaseHarness();
+  const {
+    created: reviewMission,
+    execute: executeReview,
+    reviewed: reviewedRelease,
+  } = await createReleaseMissionAtApproval(reviewOrchestrator, {
       stopBeforeReview: true,
     });
 
@@ -693,9 +1777,9 @@ test("passing release gates reject explicit failed outcomes and reused Evidence"
   );
   assert.equal(reviewOrchestrator.getMission(reviewMission.id).status, "IN_REVIEW");
 
-  const validationOrchestrator = createHarness();
+  const validationOrchestrator = createReleaseHarness();
   const { created: validationMission, execute: executeValidation } =
-    createReleaseMissionAtApproval(validationOrchestrator, {
+    await createReleaseMissionAtApproval(validationOrchestrator, {
       stopBeforeValidation: true,
     });
   assert.throws(
@@ -728,40 +1812,65 @@ test("passing release gates reject explicit failed outcomes and reused Evidence"
     "VALIDATING",
   );
 
-  const duplicateOrchestrator = createHarness();
+  const duplicateOrchestrator = createReleaseHarness();
   const { created: duplicateMission, execute: executeDuplicate } =
-    createReleaseMissionAtApproval(duplicateOrchestrator, {
+    await createReleaseMissionAtApproval(duplicateOrchestrator, {
       stopBeforeReview: true,
     });
+  const reviewer = reviewedRelease.execution.nodes.find(
+    (node) => node.assignment.id === "review-release-candidate",
+  );
   assert.throws(
     () =>
       executeDuplicate(
         "PASS_REVIEW",
-        { review: { summary: "Independent review passed" } },
+        {
+          review: {
+            summary: "Independent review passed",
+            reviewerAssignmentId: reviewer.assignment.id,
+            outcome: reviewer.reviewOutcome.outcome,
+            candidateArtifactRefs: reviewer.reviewOutcome.candidateArtifactRefs,
+            findings: reviewer.reviewOutcome.findings,
+          },
+        },
         "Attempt to reuse Artifact Evidence for review",
         ["evidence://artifact-release-1"],
       ),
-    /Evidence refs distinct from earlier release gates/,
+    /current passing structured reviewer outcome, independent Sol Reviewer Evidence, and actor/,
   );
   assert.equal(
     duplicateOrchestrator.getMission(duplicateMission.id).status,
     "IN_REVIEW",
   );
 
-  const validationDuplicateOrchestrator = createHarness();
+  const validationDuplicateOrchestrator = createReleaseHarness();
   const {
     created: validationDuplicateMission,
     execute: executeValidationDuplicate,
-  } = createReleaseMissionAtApproval(validationDuplicateOrchestrator, {
+  } = await createReleaseMissionAtApproval(validationDuplicateOrchestrator, {
     stopBeforeValidation: true,
   });
   assert.throws(
     () =>
       executeValidationDuplicate(
         "PASS_VALIDATION",
-        { validation: { summary: "Validation passed" } },
+        {
+          validation: {
+            ...passingReleaseValidation(),
+            gates: [
+              {
+                ...passingReleaseValidation().gates[0],
+                evidenceRef: "evidence://review-release-1",
+              },
+              passingReleaseValidation().gates[1],
+            ],
+          },
+        },
         "Attempt to reuse Review Evidence for validation",
-        ["evidence://review-release-1"],
+        [
+          "evidence://review-release-1",
+          "evidence://validation-release-integration",
+        ],
       ),
     /Evidence refs distinct from earlier release gates/,
   );
@@ -772,11 +1881,11 @@ test("passing release gates reject explicit failed outcomes and reused Evidence"
   );
 });
 
-test("authorized human approval records the exact candidate without releasing it", () => {
+test("authorized human approval records the exact candidate without releasing it", async () => {
   const eventStore = createMemoryEventStore();
-  const orchestrator = createHarness(eventStore);
+  const orchestrator = createReleaseHarness(eventStore);
   const { created, execute, approvalRequired } =
-    createReleaseMissionAtApproval(orchestrator);
+    await createReleaseMissionAtApproval(orchestrator);
 
   const ready = execute(
     "APPROVE_RELEASE",
@@ -785,14 +1894,26 @@ test("authorized human approval records the exact candidate without releasing it
     approvalRequired.releaseReadiness.evidenceRefs,
     "release-owner",
   );
-  const replayed = createHarness(eventStore).getMission(created.id);
+  const replayed = createReleaseHarness(eventStore).getMission(created.id);
+  const expectedApproval = {
+    decision: "APPROVED",
+    summary: "Approve this exact candidate for release",
+    ...expectedReleaseReadiness([
+      releaseArtifact("release-candidate-1", "artifact://release-candidate-1"),
+    ]),
+  };
 
   assert.deepEqual(
     {
       status: ready.status,
       approval: ready.approval,
       allowedActions: ready.allowedActions,
-      latestEvent: ready.events.at(-1),
+      latestEvent: {
+        type: ready.events.at(-1).type,
+        actor: ready.events.at(-1).actor,
+        evidenceRefs: ready.events.at(-1).evidenceRefs,
+        approval: ready.events.at(-1).data.approval,
+      },
       emittedExternalAction: ready.events.some((event) =>
         ["RELEASED", "DEPLOYED", "PUSHED", "PULL_REQUEST_OPENED"].includes(
           event.type,
@@ -803,173 +1924,36 @@ test("authorized human approval records the exact candidate without releasing it
     },
     {
       status: "READY_TO_RELEASE",
-      approval: {
-        decision: "APPROVED",
-        summary: "Approve this exact candidate for release",
-        candidate: releaseArtifact(
-          "release-candidate-1",
-          "artifact://release-candidate-1",
-        ),
-        candidateArtifacts: [
-          releaseArtifact(
-            "release-candidate-1",
-            "artifact://release-candidate-1",
-          ),
-        ],
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        residualRisk:
-          "A rollback may still be required after deployment",
-        intendedExternalAction: "Deploy the approved build to production",
-        rollbackCommitment: "Restore the previous immutable release",
-      },
+      approval: expectedApproval,
       allowedActions: [
         "revise_context",
         "block_mission",
         "cancel_mission",
       ],
       latestEvent: {
-        schemaVersion: 2,
-        id: "event-8",
-        missionId: created.id,
-        sequence: 8,
         type: "RELEASE_APPROVED",
         actor: "release-owner",
-        occurredAt: "2026-07-28T08:00:00.000Z",
-        reason: "Release owner accepts the current residual risk",
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        data: {
-          approval: {
-            decision: "APPROVED",
-            summary: "Approve this exact candidate for release",
-            candidate: releaseArtifact(
-              "release-candidate-1",
-              "artifact://release-candidate-1",
-            ),
-            candidateArtifacts: [
-              releaseArtifact(
-                "release-candidate-1",
-                "artifact://release-candidate-1",
-              ),
-            ],
-            contextPackVersion: 1,
-            evidenceRefs: [
-              "evidence://artifact-release-1",
-              "evidence://review-release-1",
-              "evidence://validation-release-1",
-            ],
-            residualRisk:
-              "A rollback may still be required after deployment",
-            intendedExternalAction:
-              "Deploy the approved build to production",
-            rollbackCommitment: "Restore the previous immutable release",
-          },
-        },
+        evidenceRefs: expectedApproval.evidenceRefs,
+        approval: expectedApproval,
       },
       emittedExternalAction: false,
       replayedStatus: "READY_TO_RELEASE",
-      replayedApproval: {
-        decision: "APPROVED",
-        summary: "Approve this exact candidate for release",
-        candidate: releaseArtifact(
-          "release-candidate-1",
-          "artifact://release-candidate-1",
-        ),
-        candidateArtifacts: [
-          releaseArtifact(
-            "release-candidate-1",
-            "artifact://release-candidate-1",
-          ),
-        ],
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        residualRisk:
-          "A rollback may still be required after deployment",
-        intendedExternalAction: "Deploy the approved build to production",
-        rollbackCommitment: "Restore the previous immutable release",
-      },
+      replayedApproval: expectedApproval,
     },
   );
 });
 
 test("release approval snapshots every Artifact in a connected candidate set", async () => {
-  const agentRouter = createAgentRoutingAdapter({
-    transport: {
-      async *run() {
-        yield {
-          kind: "started",
-          runId: "run-release-set",
-          occurredAt: "2026-07-30T13:30:00.000Z",
-        };
-        yield {
-          kind: "completed",
-          runId: "run-release-set",
-          occurredAt: "2026-07-30T13:31:00.000Z",
-          summary: "Submitted application and migration Artifacts",
-          artifacts: [
-            releaseArtifact("application", "artifact://release/application"),
-            releaseArtifact("migration", "artifact://release/migration"),
-          ],
-          evidence: [
-            {
-              ref: "evidence://release-set",
-              kind: "inspection",
-              summary: "Both Artifacts inspected",
-            },
-          ],
-        };
-      },
-    },
+  const candidateArtifacts = [
+    releaseArtifact("application", "artifact://release/application"),
+    releaseArtifact("migration", "artifact://release/migration"),
+  ];
+  const orchestrator = createReleaseHarness(createMemoryEventStore(), {
+    candidateArtifacts,
   });
-  const orchestrator = createHarness(createMemoryEventStore(), agentRouter);
-  const created = orchestrator.createMission({
-    brief: {
-      ...validBrief,
-      releaseRequired: true,
-      releaseAuthorized: true,
-      releaseAuthority: "release-owner",
-      releasePlan: {
-        residualRisk: "Migration may require rollback",
-        intendedExternalAction: "Deploy application and migration together",
-        rollbackCommitment: "Restore both previous Artifacts",
-      },
-    },
-    actor: "mission-owner",
-    reason: "Create a multi-Artifact release Mission",
-  });
-  advanceToPlanned(orchestrator, created.id);
-  await orchestrator.dispatchAssignment(created.id, {
-    assignment: boundedAssignment,
-    actor: "mission-owner",
-    reason: "Route multi-Artifact release candidate",
-  });
-  orchestrator.execute(created.id, {
-    type: "PASS_REVIEW",
-    payload: { review: { summary: "Artifact set reviewed together" } },
-    actor: "sol-reviewer",
-    reason: "Review the full candidate set",
-    evidenceRefs: ["evidence://review-release-set"],
-  });
-  const approvalRequired = orchestrator.execute(created.id, {
-    type: "PASS_VALIDATION",
-    payload: { validation: { summary: "Artifact set validated together" } },
-    actor: "mission-owner",
-    reason: "Validate the full candidate set",
-    evidenceRefs: ["evidence://validation-release-set"],
-  });
+  const { created, approvalRequired } = await createReleaseMissionAtApproval(
+    orchestrator,
+  );
   const approved = orchestrator.execute(created.id, {
     type: "APPROVE_RELEASE",
     payload: { approval: { summary: "Approve the complete Artifact set" } },
@@ -1002,10 +1986,11 @@ test("release approval snapshots every Artifact in a connected candidate set", a
   );
 });
 
-test("authorized human rejection returns the exact release candidate for correction", () => {
-  const orchestrator = createHarness();
-  const { execute, approvalRequired } =
-    createReleaseMissionAtApproval(orchestrator);
+test("authorized human rejection invalidates the exact release candidate", async () => {
+  const orchestrator = createReleaseHarness();
+  const { execute, approvalRequired } = await createReleaseMissionAtApproval(
+    orchestrator,
+  );
 
   const rejected = execute(
     "REJECT_RELEASE",
@@ -1031,46 +2016,30 @@ test("authorized human rejection returns the exact release candidate for correct
       approval: {
         decision: "REJECTED",
         summary: "Rollback evidence needs more detail",
-        candidate: releaseArtifact(
-          "release-candidate-1",
-          "artifact://release-candidate-1",
-        ),
-        candidateArtifacts: [
+        ...expectedReleaseReadiness([
           releaseArtifact(
             "release-candidate-1",
             "artifact://release-candidate-1",
           ),
-        ],
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        residualRisk:
-          "A rollback may still be required after deployment",
-        intendedExternalAction: "Deploy the approved build to production",
-        rollbackCommitment: "Restore the previous immutable release",
+        ]),
       },
       changeRequest: {
         source: "APPROVAL",
         reason: "Rollback evidence needs more detail",
-        evidenceRefs: [
-          "evidence://artifact-release-1",
-          "evidence://review-release-1",
-          "evidence://validation-release-1",
-        ],
-        requestedAtSequence: 8,
+        evidenceRefs: expectedReleaseReadiness([
+          releaseArtifact(
+            "release-candidate-1",
+            "artifact://release-candidate-1",
+          ),
+        ]).evidenceRefs,
+        requestedAtSequence: rejected.events.at(-1).sequence,
       },
       releaseReadiness: null,
       invalidatedArtifactRefs: ["artifact://release-candidate-1"],
-      invalidatedEvidenceRefs: [
-        "evidence://artifact-release-1",
-        "evidence://review-release-1",
-        "evidence://validation-release-1",
-      ],
+      invalidatedEvidenceRefs: expectedReleaseReadiness([
+        releaseArtifact("release-candidate-1", "artifact://release-candidate-1"),
+      ]).evidenceRefs,
       allowedActions: [
-        "start_correction",
         "revise_context",
         "block_mission",
         "cancel_mission",
@@ -1080,103 +2049,58 @@ test("authorized human rejection returns the exact release candidate for correct
   );
 });
 
-test("approval correction requires a regenerated candidate and current gate Evidence", () => {
-  const orchestrator = createHarness();
-  const { execute, approvalRequired } =
-    createReleaseMissionAtApproval(orchestrator);
-  execute(
+test("release rejection invalidates the old candidate Evidence for replay", async () => {
+  const eventStore = createMemoryEventStore();
+  const orchestrator = createReleaseHarness(eventStore);
+  const { created, execute, approvalRequired } =
+    await createReleaseMissionAtApproval(orchestrator);
+  const rejected = execute(
     "REJECT_RELEASE",
-    { approval: { summary: "Candidate needs a safer rollback plan" } },
-    "Reject release candidate v1",
+    { approval: { summary: "Release evidence requires correction" } },
+    "Release owner returns the candidate for correction",
     approvalRequired.releaseReadiness.evidenceRefs,
     "release-owner",
   );
-  const correction = execute(
-    "START_CORRECTION",
-    { run: { id: "run-release-2", agentRole: "terra_builder" } },
-    "Return approval rejection to the builder",
-  );
-  execute(
-    "SUBMIT_ARTIFACT",
-    {
-      artifact: releaseArtifact(
-        "release-candidate-2",
-        "artifact://release-candidate-2",
-      ),
-    },
-    "Submit regenerated release candidate",
-    ["evidence://artifact-release-2"],
-  );
-  execute(
-    "PASS_REVIEW",
-    { review: { summary: "Candidate v2 review passed" } },
-    "Review regenerated candidate",
-    ["evidence://review-release-2"],
-  );
-  const secondApproval = execute(
-    "PASS_VALIDATION",
-    { validation: { summary: "Candidate v2 validation passed" } },
-    "Validate regenerated candidate",
-    ["evidence://validation-release-2"],
-  );
-  const eventCount = secondApproval.events.length;
-
-  assert.throws(
-    () =>
-      execute(
-        "APPROVE_RELEASE",
-        { approval: { summary: "Attempt stale approval" } },
-        "Attempt to approve with stale gate Evidence",
-        approvalRequired.releaseReadiness.evidenceRefs,
-        "release-owner",
-      ),
-    /APPROVE_RELEASE requires current Evidence/,
-  );
-  assert.deepEqual(
-    {
-      correctionApproval: correction.approval,
-      status: secondApproval.status,
-      approval: secondApproval.approval,
-      releaseReadiness: secondApproval.releaseReadiness,
-      invalidatedArtifactRefs: secondApproval.invalidatedArtifactRefs,
-      eventCount: orchestrator.getMission(secondApproval.id).events.length,
-    },
-    {
-      correctionApproval: null,
-      status: "APPROVAL_REQUIRED",
-      approval: null,
-      releaseReadiness: {
-        candidate: releaseArtifact(
-          "release-candidate-2",
-          "artifact://release-candidate-2",
-        ),
-        candidateArtifacts: [
-          releaseArtifact(
-            "release-candidate-2",
-            "artifact://release-candidate-2",
-          ),
-        ],
-        contextPackVersion: 1,
-        evidenceRefs: [
-          "evidence://artifact-release-2",
-          "evidence://review-release-2",
-          "evidence://validation-release-2",
-        ],
-        residualRisk:
-          "A rollback may still be required after deployment",
-        intendedExternalAction: "Deploy the approved build to production",
-        rollbackCommitment: "Restore the previous immutable release",
+  const staleApproval = {
+    schemaVersion: 2,
+    id: "event-stale-release-approval",
+    missionId: created.id,
+    sequence: rejected.events.length + 1,
+    type: "RELEASE_APPROVED",
+    actor: "release-owner",
+    occurredAt: "2026-08-28T09:03:00.000Z",
+    reason: "Attempt to restore invalidated approval Evidence",
+    contextPackVersion: 1,
+    evidenceRefs: approvalRequired.releaseReadiness.evidenceRefs,
+    data: {
+      approval: {
+        decision: "APPROVED",
+        summary: "Attempt to restore invalidated approval Evidence",
+        ...approvalRequired.releaseReadiness,
       },
-      invalidatedArtifactRefs: ["artifact://release-candidate-1"],
-      eventCount,
     },
+  };
+  const replay = createReleaseHarness(
+    createMemoryEventStore({
+      [created.id]: [...rejected.events, staleApproval],
+    }),
+  );
+
+  assert.ok(
+    rejected.invalidatedEvidenceRefs.includes(
+      "evidence://validation-release-unit",
+    ),
+  );
+  assert.throws(
+    () => replay.getMission(created.id),
+    /RELEASE_APPROVED is not allowed while Mission is CHANGES_REQUESTED/,
   );
 });
 
-test("approval authority and replay fail closed for missing, duplicate, out-of-order, or stale decisions", () => {
-  const orchestrator = createHarness();
+test("approval authority and replay fail closed for missing, duplicate, out-of-order, or stale decisions", async () => {
+  const orchestrator = createReleaseHarness();
   const { created, execute, approvalRequired } =
-    createReleaseMissionAtApproval(orchestrator);
+    await createReleaseMissionAtApproval(orchestrator);
   const eventCount = approvalRequired.events.length;
   assert.throws(
     () =>
@@ -1199,7 +2123,7 @@ test("approval authority and replay fail closed for missing, duplicate, out-of-o
   const approvalEvent = {
     id: "event-forged-approval",
     missionId: created.id,
-    sequence: 8,
+    sequence: approvalRequired.events.length + 1,
     type: "RELEASE_APPROVED",
     actor: "release-owner",
     occurredAt: "2026-07-30T14:00:00.000Z",
@@ -1223,18 +2147,28 @@ test("approval authority and replay fail closed for missing, duplicate, out-of-o
     evidenceRefs: [
       "evidence://artifact-release-stale",
       "evidence://review-release-1",
-      "evidence://validation-release-1",
+      ...passingReleaseValidationEvidenceRefs(),
     ],
+  };
+  const tamperedGateDeclaration = {
+    ...approvalEvent,
+    id: "event-tampered-validation-gates",
+    data: {
+      approval: {
+        ...approvalSnapshot,
+        requiredValidationGates: ["forged-gate"],
+      },
+    },
   };
   const outOfOrderDecision = {
     ...approvalEvent,
     id: "event-out-of-order-approval",
-    sequence: 7,
+    sequence: approvalRequired.events.at(-1).sequence,
   };
   const duplicateDecision = {
     ...approvalEvent,
     id: "event-duplicate-approval",
-    sequence: 9,
+    sequence: approvalEvent.sequence + 1,
   };
 
   assert.throws(
@@ -1243,6 +2177,10 @@ test("approval authority and replay fail closed for missing, duplicate, out-of-o
   );
   assert.throws(
     () => replay([...approvalRequired.events, staleDecision]),
+    /exact current candidate and passing Evidence/,
+  );
+  assert.throws(
+    () => replay([...approvalRequired.events, tamperedGateDeclaration]),
     /exact current candidate and passing Evidence/,
   );
   assert.throws(
@@ -1264,11 +2202,11 @@ test("approval authority and replay fail closed for missing, duplicate, out-of-o
   );
 });
 
-test("material Context revision invalidates a recorded release approval", () => {
+test("material Context revision invalidates a recorded release approval", async () => {
   const eventStore = createMemoryEventStore();
-  const orchestrator = createHarness(eventStore);
+  const orchestrator = createReleaseHarness(eventStore);
   const { created, execute, approvalRequired } =
-    createReleaseMissionAtApproval(orchestrator);
+    await createReleaseMissionAtApproval(orchestrator);
   const approved = execute(
     "APPROVE_RELEASE",
     { approval: { summary: "Approve candidate before Context changes" } },
@@ -1278,7 +2216,9 @@ test("material Context revision invalidates a recorded release approval", () => 
   );
   const revised = execute(
     "REVISE_CONTEXT",
-    { context: { summary: "Material release Context v2" } },
+    {
+      context: sourceBackedContext("Material release Context v2"),
+    },
     "Repository state changed after approval",
   );
 
@@ -1298,11 +2238,9 @@ test("material Context revision invalidates a recorded release approval", () => 
       approval: null,
       releaseReadiness: null,
       invalidatedArtifactRefs: ["artifact://release-candidate-1"],
-      invalidatedEvidenceRefs: [
-        "evidence://artifact-release-1",
-        "evidence://review-release-1",
-        "evidence://validation-release-1",
-      ],
+      invalidatedEvidenceRefs: expectedReleaseReadiness([
+        releaseArtifact("release-candidate-1", "artifact://release-candidate-1"),
+      ]).evidenceRefs,
       allowedActions: [
         "accept_plan",
         "revise_context",
@@ -1355,10 +2293,7 @@ test("no-release Mission completes through every observable lifecycle state", ()
     {
       type: "CAPTURE_CONTEXT",
       payload: {
-        context: {
-          summary: "Approved PRD and hybrid UI decision",
-          sourceRefs: ["docs://prd", "docs://ui-decision"],
-        },
+        context: sourceBackedContext("Approved PRD and hybrid UI decision"),
       },
       reason: "Attach the bounded Context Pack",
     },
@@ -1554,7 +2489,11 @@ test("completed Mission reloads from local event history into the same state", (
     reason: "Create a Mission that survives reload",
   });
   const commands = [
-    ["CAPTURE_CONTEXT", "context", { summary: "Versioned Context Pack" }],
+    [
+      "CAPTURE_CONTEXT",
+      "context",
+      sourceBackedContext("Versioned Context Pack"),
+    ],
     ["ACCEPT_PLAN", "plan", { steps: ["run locally"] }],
     ["START_RUN", "run", { agentRole: "mock-runner" }],
     ["SUBMIT_ARTIFACT", "artifact", { uri: "artifact://persisted" }],
@@ -1812,7 +2751,11 @@ test("evidence-bearing transition fails closed when Evidence is missing", () => 
     reason: "Create a Mission with guarded Evidence",
   });
   const setupCommands = [
-    ["CAPTURE_CONTEXT", "context", { summary: "Bounded Context" }],
+    [
+      "CAPTURE_CONTEXT",
+      "context",
+      sourceBackedContext("Bounded Context"),
+    ],
     ["ACCEPT_PLAN", "plan", { steps: ["run"] }],
     ["START_RUN", "run", { agentRole: "mock-runner" }],
   ];
@@ -1884,7 +2827,9 @@ test("competing writer cannot overwrite or duplicate the next event sequence", (
     () =>
       orchestrator.execute(mission.id, {
         type: "CAPTURE_CONTEXT",
-        payload: { context: { summary: "Original writer Context" } },
+        payload: {
+          context: sourceBackedContext("Original writer Context"),
+        },
         actor: "mission-owner",
         reason: "Original writer attempts the next event",
       }),
@@ -1949,7 +2894,7 @@ test("browser write coordinator serializes two Orchestrators racing for one sequ
   });
   const command = (summary) => ({
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary } },
+    payload: { context: sourceBackedContext(summary) },
     actor: "mission-owner",
     reason: `Capture ${summary}`,
   });
@@ -2021,7 +2966,7 @@ test("Mission Orchestrator routes one bounded Assignment and attaches completed 
     actor: "mission-owner",
     reason: "Create a Mission for a real bounded Assignment",
   });
-  advanceToPlanned(orchestrator, mission.id);
+  const planned = advanceToPlanned(orchestrator, mission.id);
 
   const completedRun = await orchestrator.dispatchAssignment(mission.id, {
     assignment: boundedAssignment,
@@ -2042,7 +2987,10 @@ test("Mission Orchestrator routes one bounded Assignment and attaches completed 
     },
     {
       missionStatus: "IN_REVIEW",
-      assignment: boundedAssignment,
+      assignment: {
+        ...boundedAssignment,
+        contextSlice: planned.context,
+      },
       agent: {
         roleId: "luna_worker",
         roleName: "Luna Worker",
@@ -2433,10 +3381,7 @@ test("review rejection enters CHANGES_REQUESTED with distinct reason and Evidenc
     {
       type: "CAPTURE_CONTEXT",
       payload: {
-        context: {
-          summary: "Ticket 02 correction-loop Context",
-          sourceRefs: ["tickets.md#02"],
-        },
+        context: sourceBackedContext("Ticket 02 correction-loop Context"),
       },
       reason: "Capture correction-loop Context",
     },
@@ -2511,7 +3456,7 @@ test("review rejection enters CHANGES_REQUESTED with distinct reason and Evidenc
         "cancel_mission",
       ],
       latestEvent: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         id: "event-6",
         missionId: "mission-001",
         sequence: 6,
@@ -2543,7 +3488,9 @@ test("validation failure enters CHANGES_REQUESTED without erasing its gate prove
   const commands = [
     {
       type: "CAPTURE_CONTEXT",
-      payload: { context: { summary: "Validation failure Context" } },
+      payload: {
+        context: sourceBackedContext("Validation failure Context"),
+      },
       reason: "Capture Context",
     },
     {
@@ -2646,7 +3593,7 @@ test("repeated correction loops require regenerated Artifact and Evidence refere
 
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Repeated correction Context" } },
+    { context: sourceBackedContext("Repeated correction Context") },
     "Capture Context",
   );
   execute(
@@ -2824,10 +3771,7 @@ test("material Context revision increments its version and invalidates downstrea
   execute(
     "CAPTURE_CONTEXT",
     {
-      context: {
-        summary: "Context v1",
-        sourceRefs: ["context://v1"],
-      },
+      context: sourceBackedContext("Context v1"),
     },
     "Capture Context v1",
   );
@@ -2863,10 +3807,9 @@ test("material Context revision increments its version and invalidates downstrea
   const revised = execute(
     "REVISE_CONTEXT",
     {
-      context: {
-        summary: "Context v2 includes a material event-store constraint",
-        sourceRefs: ["context://v2"],
-      },
+      context: sourceBackedContext(
+        "Context v2 includes a material event-store constraint",
+      ),
     },
     "Material repository change requires a new Context Pack",
   );
@@ -2890,10 +3833,10 @@ test("material Context revision increments its version and invalidates downstrea
     {
       status: "CONTEXT_READY",
       contextPackVersion: 2,
-      context: {
-        summary: "Context v2 includes a material event-store constraint",
-        sourceRefs: ["context://v2"],
-      },
+      context: projectedSourceBackedContext(
+        "Context v2 includes a material event-store constraint",
+        2,
+      ),
       plan: null,
       run: null,
       artifact: null,
@@ -2913,7 +3856,7 @@ test("material Context revision increments its version and invalidates downstrea
         "cancel_mission",
       ],
       latestEvent: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         id: "event-8",
         missionId: "mission-001",
         sequence: 8,
@@ -2924,10 +3867,10 @@ test("material Context revision increments its version and invalidates downstrea
         contextPackVersion: 2,
         evidenceRefs: [],
         data: {
-          context: {
-            summary: "Context v2 includes a material event-store constraint",
-            sourceRefs: ["context://v2"],
-          },
+          context: projectedSourceBackedContext(
+            "Context v2 includes a material event-store constraint",
+            2,
+          ),
         },
       },
     },
@@ -2981,7 +3924,7 @@ test("blocked Mission records its prior safe state and resumes without skipping 
 
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Block and resume Context" } },
+    { context: sourceBackedContext("Block and resume Context") },
     "Capture Context",
   );
   execute(
@@ -3128,7 +4071,7 @@ test("cancelled Mission is terminal while its complete event history remains rep
 
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Cancellation Context" } },
+    { context: sourceBackedContext("Cancellation Context") },
     "Capture Context",
   );
   execute(
@@ -3434,7 +4377,7 @@ test("replay rejects stale Evidence reused after a correction request", () => {
     });
   execute(
     "CAPTURE_CONTEXT",
-    { context: { summary: "Stale Evidence replay Context" } },
+    { context: sourceBackedContext("Stale Evidence replay Context") },
     "Capture Context",
   );
   execute(
@@ -3765,10 +4708,7 @@ test("planned Task Graph exposes dependencies and its unblocked Assignment front
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
     payload: {
-      context: {
-        summary: "Context for a multi-agent Mission",
-        sourceRefs: ["tickets.md#05"],
-      },
+      context: sourceBackedContext("Context for a multi-agent Mission"),
     },
     actor: "mission-owner",
     reason: "Capture the Ticket 05 Context",
@@ -3865,7 +4805,9 @@ test("Task Graph rejects a dependency cycle before appending the Plan", () => {
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Cycle validation Context" } },
+    payload: {
+      context: sourceBackedContext("Cycle validation Context"),
+    },
     actor: "mission-owner",
     reason: "Capture Context before planning",
   });
@@ -3938,7 +4880,9 @@ test("execution wave reserves Orchestrator capacity and serializes overlapping w
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Safe-wave Context" } },
+    payload: {
+      context: sourceBackedContext("Safe-wave Context"),
+    },
     actor: "mission-owner",
     reason: "Capture safe-wave Context",
   });
@@ -4075,7 +5019,9 @@ test("Decision Room requires structured Evidence-backed judgment before conseque
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Decision Room Context" } },
+    payload: {
+      context: sourceBackedContext("Decision Room Context"),
+    },
     actor: "mission-owner",
     reason: "Capture decision Context",
   });
@@ -4311,7 +5257,9 @@ test("independent reviewer findings return only owned work and its downstream re
   });
   orchestrator.execute(created.id, {
     type: "CAPTURE_CONTEXT",
-    payload: { context: { summary: "Targeted correction Context" } },
+    payload: {
+      context: sourceBackedContext("Targeted correction Context"),
+    },
     actor: "mission-owner",
     reason: "Capture targeted correction Context",
   });
@@ -4520,33 +5468,9 @@ test("independent reviewer findings return only owned work and its downstream re
 
 test("a completed Mission promotes a reviewed Playbook Candidate without reopening Mission completion", async () => {
   const orchestrator = createPlaybookReviewHarness();
-  const created = orchestrator.createMission({
-    brief: validBrief,
-    actor: "mission-owner",
-    reason: "Create a Mission with observable retrospective outcomes",
-  });
-  const execute = (type, payload, reason, evidenceRefs = [], actor = "mission-owner") =>
-    orchestrator.execute(created.id, {
-      type,
-      payload,
-      actor,
-      reason,
-      evidenceRefs,
-    });
-  const completionCommands = [
-    ["CAPTURE_CONTEXT", { context: { summary: "Capture the completed Mission context" } }, "Capture context"],
-    ["ACCEPT_PLAN", { plan: { steps: ["complete the bounded Mission"] } }, "Accept plan"],
-    ["START_RUN", { run: { id: "run-playbook", agentRole: "terra_builder" } }, "Start run"],
-    ["SUBMIT_ARTIFACT", { artifact: { uri: "artifact://playbook-source" } }, "Submit artifact", ["evidence://playbook-artifact"]],
-    ["PASS_REVIEW", { review: { summary: "Mission review passed" } }, "Pass Mission review", ["evidence://playbook-mission-review"]],
-    ["PASS_VALIDATION", { validation: { summary: "Mission validation passed" } }, "Pass Mission validation", ["evidence://playbook-validation"]],
-    ["CAPTURE_LEARNING", { learning: { summary: "Record observed retry outcome" } }, "Capture learning", ["evidence://playbook-learning"]],
-    ["COMPLETE_NO_RELEASE", { completion: { summary: "Complete the Mission" } }, "Complete Mission", ["evidence://playbook-completion"]],
-  ];
-  let completed;
-  for (const [type, payload, reason, evidenceRefs] of completionCommands) {
-    completed = execute(type, payload, reason, evidenceRefs);
-  }
+  const { created, completed, execute } = createCompletedPlaybookMission(
+    orchestrator,
+  );
 
   const evaluationSet = {
     id: "evaluation-set:retry-guidance",
@@ -4583,6 +5507,34 @@ test("a completed Mission promotes a reviewed Playbook Candidate without reopeni
       protectedConfiguration,
       metrics: baselineMetrics,
       criticalRegressionCaseIds: [],
+      caseResults: [
+        {
+          caseId: "case:retry-evidence",
+          artifactRef: "artifact://playbook/baseline/1/case-retry-evidence",
+          evidenceRefs: [
+            "evidence://playbook/baseline/1/case-retry-evidence",
+          ],
+          acceptanceScore: 0.8,
+          criticalRegression: false,
+          reviewFindings: 2,
+          retries: 3,
+          cycleTimeMs: 60000,
+          tokenUse: 5000,
+        },
+        {
+          caseId: "case:review-handoff",
+          artifactRef: "artifact://playbook/baseline/1/case-review-handoff",
+          evidenceRefs: [
+            "evidence://playbook/baseline/1/case-review-handoff",
+          ],
+          acceptanceScore: 0.8,
+          criticalRegression: false,
+          reviewFindings: 2,
+          retries: 2,
+          cycleTimeMs: 60000,
+          tokenUse: 5000,
+        },
+      ],
     },
     candidate: {
       id: "playbook:retry-guidance",
@@ -4603,6 +5555,34 @@ test("a completed Mission promotes a reviewed Playbook Candidate without reopeni
         tokenUse: 9000,
       },
       criticalRegressionCaseIds: [],
+      caseResults: [
+        {
+          caseId: "case:retry-evidence",
+          artifactRef: "artifact://playbook/candidate/2/case-retry-evidence",
+          evidenceRefs: [
+            "evidence://playbook/candidate/2/case-retry-evidence",
+          ],
+          acceptanceScore: 0.9,
+          criticalRegression: false,
+          reviewFindings: 1,
+          retries: 1,
+          cycleTimeMs: 50000,
+          tokenUse: 4500,
+        },
+        {
+          caseId: "case:review-handoff",
+          artifactRef: "artifact://playbook/candidate/2/case-review-handoff",
+          evidenceRefs: [
+            "evidence://playbook/candidate/2/case-review-handoff",
+          ],
+          acceptanceScore: 0.9,
+          criticalRegression: false,
+          reviewFindings: 1,
+          retries: 2,
+          cycleTimeMs: 50000,
+          tokenUse: 4500,
+        },
+      ],
     },
     declaredTarget: {
       metric: "acceptancePassRate",
@@ -4612,9 +5592,10 @@ test("a completed Mission promotes a reviewed Playbook Candidate without reopeni
 
   const evaluated = execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
+  assert.deepEqual(evaluated.playbook.candidate, candidateInput.candidate);
   const requested = execute(
     "REQUEST_PLAYBOOK_PROMOTION",
     { request: {} },
@@ -4670,7 +5651,7 @@ test("a release-authorized human can reject an evaluated Playbook Candidate with
 
   execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: playbookCandidateInputForMission(created.id) },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   const rejected = execute(
@@ -4713,11 +5694,10 @@ test("a release-authorized human can reject an evaluated Playbook Candidate with
 test("a release-authorized human can roll back an active promoted Playbook version without rewriting it", async () => {
   const orchestrator = createPlaybookReviewHarness();
   const { created, execute } = createCompletedPlaybookMission(orchestrator);
-  const candidateInput = playbookCandidateInputForMission(created.id);
 
   execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   execute(
@@ -4783,7 +5763,7 @@ test("replay rejects a duplicate Playbook promotion request after an independent
 
   execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   execute(
@@ -4833,10 +5813,10 @@ test("invalid Playbook commands fail closed without appending a decision event",
   );
   const invalidOrchestrator = createHarness();
   const { created: invalidMission, execute: executeInvalid } =
-    createCompletedPlaybookMission(invalidOrchestrator);
-  const mismatchedRetrospective = playbookCandidateInputForMission(
-    "mission-from-unrelated-observations",
-  );
+    createCompletedPlaybookMission(
+      invalidOrchestrator,
+      () => playbookCandidateInputForMission("mission-from-unrelated-observations"),
+    );
   const eventsBeforeMismatchedRetrospective = invalidOrchestrator.getMission(
     invalidMission.id,
   ).events.length;
@@ -4844,7 +5824,7 @@ test("invalid Playbook commands fail closed without appending a decision event",
     () =>
       executeInvalid(
         "EVALUATE_PLAYBOOK_CANDIDATE",
-        { candidate: mismatchedRetrospective },
+        { candidate: {} },
         "Attempt evaluation from another Mission's retrospective",
       ),
     /retrospective must bind the completed Mission/,
@@ -4853,21 +5833,31 @@ test("invalid Playbook commands fail closed without appending a decision event",
     invalidOrchestrator.getMission(invalidMission.id).events.length,
     eventsBeforeMismatchedRetrospective,
   );
-  const criticalRegression = playbookCandidateInputForMission(invalidMission.id);
-  criticalRegression.candidate.metrics.criticalRegressions = 1;
-  criticalRegression.candidate.criticalRegressionCaseIds = [
-    "case:retry-evidence",
-  ];
-  const evaluated = executeInvalid(
+  const criticalRegressionCandidate = (missionId) => {
+    const candidateInput = playbookCandidateInputForMission(missionId);
+    candidateInput.candidate.metrics.criticalRegressions = 1;
+    candidateInput.candidate.criticalRegressionCaseIds = [
+      "case:retry-evidence",
+    ];
+    candidateInput.candidate.caseResults[0].criticalRegression = true;
+    return candidateInput;
+  };
+  const criticalOrchestrator = createHarness();
+  const { created: criticalMission, execute: executeCritical } =
+    createCompletedPlaybookMission(
+      criticalOrchestrator,
+      criticalRegressionCandidate,
+    );
+  const evaluated = executeCritical(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: criticalRegression },
+    { candidate: {} },
     "Evaluate a candidate with a critical regression",
   );
   const eventsBeforeInvalidRequest = evaluated.events.length;
 
   assert.throws(
     () =>
-      executeInvalid(
+      executeCritical(
         "REQUEST_PLAYBOOK_PROMOTION",
         { request: {} },
         "Attempt promotion despite a critical regression",
@@ -4875,17 +5865,20 @@ test("invalid Playbook commands fail closed without appending a decision event",
     /new critical regression/,
   );
   assert.equal(
-    invalidOrchestrator.getMission(invalidMission.id).events.length,
+    criticalOrchestrator.getMission(criticalMission.id).events.length,
     eventsBeforeInvalidRequest,
   );
 
   const decisionOrchestrator = createPlaybookReviewHarness();
-  const { created: decisionMission, execute: executeDecision } =
+  const {
+    created: decisionMission,
+    candidateInput,
+    execute: executeDecision,
+  } =
     createCompletedPlaybookMission(decisionOrchestrator);
-  const candidateInput = playbookCandidateInputForMission(decisionMission.id);
   executeDecision(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   const requested = executeDecision(
@@ -4994,6 +5987,56 @@ test("schema-2 and legacy completed histories replay with a default empty Playbo
   assert.deepEqual(schema2Store.load(created.id), completed.events);
 });
 
+test("schema-2 release Brief without typed gates stays readable but cannot progress", () => {
+  const missionId = "mission-legacy-release-gates";
+  const created = {
+    schemaVersion: 2,
+    id: "event-legacy-release-created",
+    missionId,
+    sequence: 1,
+    type: "MISSION_CREATED",
+    actor: "mission-owner",
+    occurredAt: "2026-07-28T08:00:00.000Z",
+    reason: "Historical release Mission before typed gates",
+    contextPackVersion: 1,
+    evidenceRefs: [],
+    data: {
+      brief: {
+        ...validBrief,
+        releaseRequired: true,
+        releaseAuthorized: true,
+        releaseAuthority: "release-owner",
+        releasePlan: {
+          residualRisk: "A rollback may still be required",
+          intendedExternalAction: "Deploy the approved build",
+          rollbackCommitment: "Restore the previous build",
+        },
+      },
+    },
+  };
+  const orchestrator = createHarness(
+    createMemoryEventStore({ [missionId]: [created] }),
+  );
+
+  const mission = orchestrator.getMission(missionId);
+  assert.equal(mission.status, "BRIEF_ACCEPTED");
+  assert.equal(
+    mission.brief.releaseValidationContract,
+    "legacy-unavailable",
+  );
+  assert.deepEqual(mission.allowedActions, ["block_mission", "cancel_mission"]);
+  assert.throws(
+    () =>
+      orchestrator.execute(missionId, {
+        type: "CAPTURE_CONTEXT",
+        payload: { context: sourceBackedContext("Legacy release Context") },
+        actor: "mission-owner",
+        reason: "Attempt to progress without declared legacy gates",
+      }),
+    /legacy release validation contract is unavailable/i,
+  );
+});
+
 test("replay rejects a human rejection after a Playbook version is promoted", async () => {
   const orchestrator = createPlaybookReviewHarness();
   const { created, execute } = createCompletedPlaybookMission(orchestrator);
@@ -5001,7 +6044,7 @@ test("replay rejects a human rejection after a Playbook version is promoted", as
 
   execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   execute(
@@ -5055,11 +6098,12 @@ test("replay rejects a human rejection after a Playbook version is promoted", as
 });
 
 function requestPlaybookTransportReview(orchestrator) {
-  const { created, execute } = createCompletedPlaybookMission(orchestrator);
-  const candidateInput = playbookCandidateInputForMission(created.id);
+  const { created, candidateInput, execute } = createCompletedPlaybookMission(
+    orchestrator,
+  );
   execute(
     "EVALUATE_PLAYBOOK_CANDIDATE",
-    { candidate: candidateInput },
+    { candidate: {} },
     "Evaluate the bounded Playbook Candidate",
   );
   const requested = execute(

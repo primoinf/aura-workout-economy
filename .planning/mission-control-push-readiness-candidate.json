@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "mission-control-push-readiness-candidate-v1",
+  "base": "784ac616ebf3585dcee6dd558e7bf09a2890559b",
+  "recipe": "SHA-256 each listed working-tree file as bytes; preserve the explicit record order below; hash UTF-8 lines '<path> <sha256>\\n' for the aggregate",
+  "records": [
+    { "path": ".codex/agents/reviewer.toml", "sha256": "ca1f07b05ca303ba119aaa1f778a6d09c81c9a1573ad35a6aea907724f849463" },
+    { "path": "package.json", "sha256": "7d83960d3804f307cc69c6db56eafeec67f9a3697e416929b861bdd175a7dbda" },
+    { "path": "docs/agents/web-workspace.md", "sha256": "e93e6eeb7c4a18ed2d7c6a6be73d78a3dd39db9b4f7702e0a8b42ef1b750b24f" },
+    { "path": "codex-mission-control/package.json", "sha256": "fd77d547b0ee64a4ef0193d5cd057e859ab6581744b8904d740dfd5a32a91b63" },
+    { "path": "codex-mission-control/package-lock.json", "sha256": "004fdd1d95d111dc115b0058c6a3f13f6b67501bf8a01a6b342c14240a31d78e" },
+    { "path": "codex-mission-control/src/context-pack-capture.js", "sha256": "a754f5e0528d66214bd71b5889d4d91592d58cb30f78c1f9ae7e4d4be39f363e" },
+    { "path": "codex-mission-control/src/main.js", "sha256": "ba4180b4919fd73164f4dff88bafe960cb439d5fc1795259208295b90d8faafd" },
+    { "path": "codex-mission-control/src/mission-orchestrator.js", "sha256": "7fb7a8a6f8626e711abfaf22b182bd42f9eb3831641b8148135dc40d13544209" },
+    { "path": "codex-mission-control/src/operations-dashboard.js", "sha256": "faa5b82087338505637962c86c440b3a00f885367bbbe83416bbfa0b88703fc7" },
+    { "path": "codex-mission-control/src/playbook-candidate.js", "sha256": "1bd4e7539caeafe534342bac5ae609f7ae649af167f3b31af956fb42c375dc26" },
+    { "path": "codex-mission-control/src/playbook-room-view.js", "sha256": "ffdccf90b5f83587946442fcc2543eca422e91d0987e0893aaeebd9f3a27e3d5" },
+    { "path": "codex-mission-control/src/task-graph-execution.js", "sha256": "1726e1922bf5096f2c54361c5a142e27a75e5e122bcb7c4b320668d61d42e3a7" },
+    { "path": "codex-mission-control/tests/context-contract.test.js", "sha256": "866f67dde60ef03508375ca717f8313e2159c4256a6002e76222b23fdea24f56" },
+    { "path": "codex-mission-control/tests/context-pack-capture.test.js", "sha256": "a5d16bc767ad94cd87eec05c39f899e0512c90928e04efac756cfb60ff7ac67a" },
+    { "path": "codex-mission-control/tests/mission-execution-hardening.test.js", "sha256": "86d25c5682951ca924a22b83b1adf8e89984434d4c04cec0190bf0e2a25be96a" },
+    { "path": "codex-mission-control/tests/mission-orchestrator.test.js", "sha256": "aa0b5ec6ae853ecbc0ae8b6cea3c4cb60034f9e2d888c7ee36d071f42e84c696" },
+    { "path": "codex-mission-control/tests/mission-presenter.test.js", "sha256": "3d94784aa2563b01abc15d4a288fc45fa95c847469bc80061f9fa45147a174f8" },
+    { "path": "codex-mission-control/tests/operations-dashboard.test.js", "sha256": "a187402ddb18457d267e50ea91bad23c962121e34c63f5594e78ae0fb79890c0" },
+    { "path": "codex-mission-control/tests/playbook-candidate.test.js", "sha256": "96582239df608c2590e5ef5fcca670332782975bba83c780c3bef400e403cb3b" },
+    { "path": "codex-mission-control/tests/playbook-room-view.test.js", "sha256": "563c7c502aa1cd477d4b59466412552792efd5167d7ed7d18ea56e411b7d7dca" },
+    { "path": "codex-mission-control/tests/production-agent-bootstrap.test.js", "sha256": "931e87bed6beb427392fe10da70971f4a3eae6bf013789cd2d3b569f330c8663" }
+  ],
+  "aggregateSha256": "dbac0807e7eba7b2987881f690824d6aa8737af07da579c3c5ce31d6aed8c500"
+}

@@ -349,6 +349,32 @@ test("Playbook Room builds explicit human decision commands without inventing re
   );
 });
 
+test("Playbook evaluation command cannot forward caller-authored metrics or case results", () => {
+  assert.deepEqual(
+    buildPlaybookActionCommand("evaluate_playbook_candidate", {
+      actor: "release-captain",
+      candidate: {
+        retrospective: {
+          missionId: "mission-forged",
+          evidenceRefs: ["evidence://forged"],
+        },
+        baseline: { metrics: { acceptancePassRate: 0 } },
+        candidate: {
+          metrics: { acceptancePassRate: 1 },
+          caseResults: [{ caseId: "case:forged" }],
+        },
+      },
+    }),
+    {
+      type: "EVALUATE_PLAYBOOK_CANDIDATE",
+      payload: { candidate: {} },
+      actor: "release-captain",
+      reason: "Mission owner evaluated the bounded Playbook Candidate",
+      evidenceRefs: [],
+    },
+  );
+});
+
 test("Playbook Room escapes user-controlled Mission and decision text", () => {
   const markup = renderPlaybookRoomContent(
     derivePlaybookRoomModel(

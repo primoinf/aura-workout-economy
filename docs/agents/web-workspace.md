@@ -37,6 +37,7 @@ This workspace is used primarily to build, test, and publish web applications.
 - Stack: standards-based JavaScript modules, CSS, Vite, and Node's built-in test runner.
 - Core behavior lives behind `src/mission-orchestrator.js`; UI code must use that public seam rather than mutate stored events directly.
 - Commands: `npm run dev`, `npm test`, and `npm run build`.
+- Supported clean install: from `codex-mission-control/`, run `npm.cmd ci`.
 - Mission history is stored locally under `codex-mission-control-events-v1` and replayed into observable state.
 - Browser writes use Web Locks to serialize the complete read, validation, and append operation across tabs.
 - Keep this application separate from both the root Aura app and the throwaway prototypes under `.scratch/`.

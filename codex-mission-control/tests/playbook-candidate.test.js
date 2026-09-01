@@ -31,6 +31,27 @@ function playbookCandidateInput() {
     cycleTimeMs: 120000,
     tokenUse: 10000,
   };
+  const caseResults = ({
+    version,
+    acceptanceScore,
+    reviewFindings,
+    retries,
+    cycleTimeMs,
+    tokenUse,
+  }) =>
+    evaluationSet.caseIds.map((caseId, index) => ({
+      caseId,
+      artifactRef: `artifact://playbook/${version}/${caseId}`,
+      evidenceRefs: [`evidence://playbook/${version}/${caseId}`],
+      acceptanceScore,
+      criticalRegression: false,
+      reviewFindings:
+        Math.floor(reviewFindings / 2) + (index < reviewFindings % 2 ? 1 : 0),
+      retries: Math.floor(retries / 2) + (index < retries % 2 ? 1 : 0),
+      cycleTimeMs:
+        Math.floor(cycleTimeMs / 2) + (index < cycleTimeMs % 2 ? 1 : 0),
+      tokenUse: Math.floor(tokenUse / 2) + (index < tokenUse % 2 ? 1 : 0),
+    }));
 
   return {
     retrospective: {
@@ -49,6 +70,14 @@ function playbookCandidateInput() {
       protectedConfiguration,
       metrics: structuredClone(baselineMetrics),
       criticalRegressionCaseIds: [],
+      caseResults: caseResults({
+        version: "baseline-1",
+        acceptanceScore: 0.8,
+        reviewFindings: 4,
+        retries: 5,
+        cycleTimeMs: 120000,
+        tokenUse: 10000,
+      }),
     },
     candidate: {
       id: "playbook:retry-guidance",
@@ -69,6 +98,14 @@ function playbookCandidateInput() {
         tokenUse: 9000,
       },
       criticalRegressionCaseIds: [],
+      caseResults: caseResults({
+        version: "candidate-2",
+        acceptanceScore: 0.9,
+        reviewFindings: 2,
+        retries: 3,
+        cycleTimeMs: 100000,
+        tokenUse: 9000,
+      }),
     },
     declaredTarget: {
       metric: "acceptancePassRate",
@@ -76,6 +113,26 @@ function playbookCandidateInput() {
     },
   };
 }
+
+test("candidate evaluation requires one observable result for every evaluation case", () => {
+  const input = playbookCandidateInput();
+  delete input.candidate.caseResults;
+
+  assert.throws(
+    () => createPlaybookCandidate(input),
+    /Candidate requires one observable result per evaluation case/,
+  );
+});
+
+test("candidate evaluation metrics must be derived from case observations", () => {
+  const input = playbookCandidateInput();
+  input.candidate.metrics.tokenUse += 1;
+
+  assert.throws(
+    () => createPlaybookCandidate(input),
+    /Candidate metrics must match observable case results/,
+  );
+});
 
 function approvedReviewPayload(
   state,
@@ -290,6 +347,7 @@ test("a new critical regression blocks a promotion request", () => {
   const input = playbookCandidateInput();
   input.candidate.metrics.criticalRegressions = 1;
   input.candidate.criticalRegressionCaseIds = ["case:review-handoff"];
+  input.candidate.caseResults[1].criticalRegression = true;
   const candidate = createPlaybookCandidate(input);
 
   assert.throws(
@@ -308,8 +366,11 @@ test("a newly introduced critical regression case blocks promotion even when agg
   const input = playbookCandidateInput();
   input.baseline.metrics.criticalRegressions = 1;
   input.baseline.criticalRegressionCaseIds = ["case:retry-evidence"];
+  input.baseline.caseResults[0].criticalRegression = true;
+  input.retrospective.metrics.criticalRegressions = 1;
   input.candidate.metrics.criticalRegressions = 1;
   input.candidate.criticalRegressionCaseIds = ["case:review-handoff"];
+  input.candidate.caseResults[1].criticalRegression = true;
   const candidate = createPlaybookCandidate(input);
 
   assert.throws(
@@ -326,6 +387,9 @@ test("a newly introduced critical regression case blocks promotion even when agg
 test("a candidate that misses its declared target improvement cannot request promotion", () => {
   const input = playbookCandidateInput();
   input.candidate.metrics.acceptancePassRate = 0.84;
+  input.candidate.caseResults.forEach((result) => {
+    result.acceptanceScore = 0.84;
+  });
   const candidate = createPlaybookCandidate(input);
 
   assert.throws(
@@ -412,6 +476,7 @@ test("a candidate evaluated on different case identities cannot request promotio
   const input = playbookCandidateInput();
   input.candidate.evaluationSet = structuredClone(input.candidate.evaluationSet);
   input.candidate.evaluationSet.caseIds[1] = "case:unreviewed-handoff";
+  input.candidate.caseResults[1].caseId = "case:unreviewed-handoff";
   const candidate = createPlaybookCandidate(input);
 
   assert.throws(

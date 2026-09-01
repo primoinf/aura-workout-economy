@@ -1112,7 +1112,8 @@ function structuredReviewOutcome(execution, reviewerNode, artifacts) {
     .filter(
       (node) =>
         dependencyIds.has(node.assignment.id) &&
-        node.assignment.workKind !== "review",
+        node.assignment.workKind !== "review" &&
+        node.assignment.validationGateType === undefined,
     )
     .flatMap((node) => node.artifacts.map(artifactReference));
   if (

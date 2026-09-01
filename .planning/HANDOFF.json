@@ -1,0 +1,146 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-01T21:52:10.000Z",
+  "phase": null,
+  "phase_name": "Mission Control push-readiness remediation (TASK-050)",
+  "phase_dir": null,
+  "plan": 1,
+  "task": 8,
+  "total_tasks": 8,
+  "status": "complete",
+  "completed_tasks": [
+    {
+      "id": 0,
+      "name": "Freeze scope and reproduce the push-readiness blockers",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 1,
+      "name": "Fail closed without a real agent transport",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 2,
+      "name": "Close release-gate self-certification",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 3,
+      "name": "Build evidence-backed Context Packs",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 4,
+      "name": "Bind Playbook evaluation to observed Mission evidence",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 5,
+      "name": "Correct approval demand to REVIEW_APPROVED",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 6,
+      "name": "Repair committed hygiene, clean install, and reviewer profile",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 7,
+      "name": "Integrated verification, candidate freeze, and parent adversarial pass",
+      "status": "done",
+      "commit": null
+    },
+    {
+      "id": 8,
+      "name": "Close TASK-050: owner waived independent review and authorized the local commit",
+      "status": "done",
+      "commit": "pending-fill"
+    }
+  ],
+  "remaining_tasks": [],
+  "blockers": [
+    {
+      "description": "The 13 local commits remain unpushed to origin/main.",
+      "type": "human_action",
+      "workaround": "Pushing requires fresh explicit owner authorization; it was not granted with the commit."
+    }
+  ],
+  "human_actions_pending": [
+    {
+      "action": "Decide whether to push the local Mission Control commit stack to origin/main.",
+      "context": "TASK-050 closed without an independent review verdict, so push carries the recorded final-strict gap.",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Close TASK-050 as parent-completed / final-strict-not-achieved after the owner waived the independent review call.",
+      "rationale": "The owner explicitly declined review on 2026-09-02 and authorized the commit; the candidate was review-ready with no known blocker and 0 of 3 review calls used.",
+      "phase": null
+    },
+    {
+      "decision": "Treat TASK-049 as complete and superseded; the Ticket 06-07 checkpoint landed as commit 784ac616ebf3585dcee6dd558e7bf09a2890559b.",
+      "rationale": "The previous handoff still described the checkpoint as pending after it had already been committed.",
+      "phase": null
+    },
+    {
+      "decision": "Hold the frozen candidate sha256:dbac0807e7eba7b2987881f690824d6aa8737af07da579c3c5ce31d6aed8c500 unchanged while review is deferred.",
+      "rationale": "Any edit to a candidate file invalidates the manifest, the assurance receipts, and the prepared review packet.",
+      "phase": null
+    },
+    {
+      "decision": "Keep assurance mode final-strict with the default review budget of target 1 and max 3 calls.",
+      "rationale": "The remediation covers audit-data integrity, release gates, and public orchestration behavior.",
+      "phase": null
+    },
+    {
+      "decision": "Do not stage generated graph output, dist output, unrelated agent configuration, runtime data, or Nihongo Dojo.",
+      "rationale": "The working tree contains multiple independent workstreams.",
+      "phase": null
+    }
+  ],
+  "uncommitted_files": [
+    ".codex/agents/reviewer.toml",
+    "package.json",
+    "docs/agents/web-workspace.md",
+    "codex-mission-control/package.json",
+    "codex-mission-control/package-lock.json",
+    "codex-mission-control/src/main.js",
+    "codex-mission-control/src/mission-orchestrator.js",
+    "codex-mission-control/src/operations-dashboard.js",
+    "codex-mission-control/src/playbook-candidate.js",
+    "codex-mission-control/src/playbook-room-view.js",
+    "codex-mission-control/src/task-graph-execution.js",
+    "codex-mission-control/src/context-pack-capture.js",
+    "codex-mission-control/tests/mission-execution-hardening.test.js",
+    "codex-mission-control/tests/mission-orchestrator.test.js",
+    "codex-mission-control/tests/mission-presenter.test.js",
+    "codex-mission-control/tests/operations-dashboard.test.js",
+    "codex-mission-control/tests/playbook-candidate.test.js",
+    "codex-mission-control/tests/playbook-room-view.test.js",
+    "codex-mission-control/tests/context-contract.test.js",
+    "codex-mission-control/tests/context-pack-capture.test.js",
+    "codex-mission-control/tests/production-agent-bootstrap.test.js",
+    ".planning/mission-control-push-readiness.md",
+    ".planning/mission-control-push-readiness-assurance.md",
+    ".planning/mission-control-push-readiness-candidate.json",
+    ".planning/mission-control-push-readiness-readiness.json",
+    ".planning/mission-control-push-readiness-readiness-proof.json",
+    ".planning/mission-control-push-readiness-review-packet.md",
+    ".planning/mission-control-push-readiness-review-attempts.jsonl",
+    "task-board.md",
+    "hotcache.md",
+    "work log.md",
+    ".planning/HANDOFF.json",
+    ".planning/.continue-here.md"
+  ],
+  "next_action": "No Mission Control work remains. Remaining workstreams are the unpushed commit stack, the uncommitted Claude routing configuration, and the separate nihongo-dojo repository.",
+  "context_notes": "TASK-050 phases 0-7 are complete and committed locally on main. The candidate was frozen at sha256:dbac0807e7eba7b2987881f690824d6aa8737af07da579c3c5ce31d6aed8c500 over 21 whole-file records with zero drift; 202/202 Node tests, clean npm ci, Vite 8.2.2 build, audit 0, syntax, scoped diff/whitespace, secret scan, manifest rehash, and desktop/mobile browser QA passed. No independent reviewer verdict exists because the owner waived the call. Ticket 06 keeps its terminal parent-completed / final-strict-not-achieved state. Browser Tab traversal and native cancel confirmation remain tooling gaps. Preserve unrelated dirty files."
+}

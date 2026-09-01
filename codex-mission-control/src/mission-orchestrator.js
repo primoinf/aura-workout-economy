@@ -17,6 +17,7 @@ import {
   rollbackPlaybookCandidate,
   requestPlaybookPromotion,
 } from "./playbook-candidate.js";
+import { assertSourceBackedContextPack } from "./context-pack-capture.js";
 import {
   applyTaskReviewFindings,
   createTaskExecution,
@@ -40,7 +41,8 @@ const REQUIRED_BRIEF_FIELDS = [
 ];
 
 const GLOBAL_AGENT_CAPACITY = 4;
-const EVENT_SCHEMA_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 3;
+const SUPPORTED_EVENT_SCHEMA_VERSIONS = new Set([2, EVENT_SCHEMA_VERSION]);
 
 export const MISSION_STATUS_ORDER = Object.freeze([
   "BRIEF_ACCEPTED",
@@ -346,6 +348,11 @@ function allowedActionsForMission(mission) {
       : ["resume_mission", "cancel_mission"];
   }
   if (
+    mission.brief?.releaseValidationContract === "legacy-unavailable"
+  ) {
+    return ["block_mission", "cancel_mission"];
+  }
+  if (
     mission.execution &&
     ["PLANNED", "RUNNING", "CHANGES_REQUESTED"].includes(mission.status)
   ) {
@@ -493,6 +500,40 @@ function sameValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function bindPlanToContext(plan, context) {
+  const boundPlan = clone(plan);
+  if (boundPlan.assignment) {
+    boundPlan.assignment.contextSlice = clone(context);
+  }
+  if (Array.isArray(boundPlan.taskGraph?.assignments)) {
+    boundPlan.taskGraph.assignments = boundPlan.taskGraph.assignments.map(
+      (assignment) => ({
+        ...assignment,
+        contextSlice: clone(context),
+      }),
+    );
+  }
+  return boundPlan;
+}
+
+function assertPlanBoundToContext(plan, context, event) {
+  const assignments = [
+    ...(plan.assignment ? [plan.assignment] : []),
+    ...(Array.isArray(plan.taskGraph?.assignments)
+      ? plan.taskGraph.assignments
+      : []),
+  ];
+  if (
+    assignments.some(
+      (assignment) => !sameValue(assignment.contextSlice, context),
+    )
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: PLAN_ACCEPTED Assignment context must match the active source-backed Context Pack.`,
+    );
+  }
+}
+
 function emptyPlaybookState() {
   return {
     status: "NOT_EVALUATED",
@@ -527,6 +568,345 @@ function currentPlaybookIdentity(playbook) {
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
+}
+
+const PLAYBOOK_EVALUATION_ARTIFACT_SCHEMA_VERSION = 1;
+const PLAYBOOK_EVALUATION_ARTIFACT_FIELDS = Object.freeze([
+  "schemaVersion",
+  "retrospective",
+  "baseline",
+  "candidate",
+  "declaredTarget",
+]);
+const PLAYBOOK_EVALUATION_EVENT_FIELDS = Object.freeze([
+  "candidate",
+  "evaluation",
+]);
+const PLAYBOOK_EVALUATION_PROVENANCE_FIELDS = Object.freeze([
+  "schemaVersion",
+  "missionId",
+  "contextPackVersion",
+  "source",
+]);
+const PLAYBOOK_EVALUATION_SOURCE_SELECTOR_FIELDS = Object.freeze([
+  "eventId",
+  "assignmentId",
+  "runId",
+  "artifactRef",
+]);
+
+function isPlainObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function hasExactKeys(value, expectedKeys) {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const actualKeys = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return (
+    actualKeys.length === expected.length &&
+    actualKeys.every((key, index) => key === expected[index])
+  );
+}
+
+function assertDistinctNonEmptyReferences(references, label) {
+  if (
+    !Array.isArray(references) ||
+    references.length === 0 ||
+    references.some((reference) => !isNonEmptyString(reference)) ||
+    new Set(references).size !== references.length
+  ) {
+    throw new Error(`${label} must be distinct non-empty references.`);
+  }
+}
+
+function playbookEvaluationSourceFromEvent(mission, event) {
+  if (event.schemaVersion !== EVENT_SCHEMA_VERSION) {
+    return null;
+  }
+  if (event.type === "AGENT_RUN_COMPLETED") {
+    const assignment = [...mission.events]
+      .filter(
+        (candidate) =>
+          candidate.sequence < event.sequence &&
+          candidate.type === "ASSIGNMENT_ROUTED",
+      )
+      .at(-1)?.data?.assignment;
+    if (!isNonEmptyString(assignment?.id)) {
+      return null;
+    }
+    return {
+      assignmentId: assignment.id,
+      artifacts: event.data?.artifacts,
+      event,
+      run: event.data?.run,
+    };
+  }
+  if (event.type === "EXECUTION_RUN_COMPLETED") {
+    if (!isNonEmptyString(event.data?.assignmentId)) {
+      return null;
+    }
+    return {
+      assignmentId: event.data.assignmentId,
+      artifacts: event.data?.artifacts,
+      event,
+      run: event.data?.run,
+    };
+  }
+  return null;
+}
+
+function playbookEvaluationSourceProvenance(source) {
+  const provenance = {
+    eventId: source.event.id,
+    eventSequence: source.event.sequence,
+    eventType: source.event.type,
+    assignmentId: source.assignmentId,
+    runId: source.run.id,
+    artifactRef: source.artifactRef,
+  };
+  if (source.event.type === "EXECUTION_RUN_COMPLETED") {
+    provenance.waveId = source.event.data.waveId;
+    provenance.attempt = source.event.data.attempt;
+  }
+  return provenance;
+}
+
+function observedPlaybookEvaluationArtifacts(mission, beforeSequence) {
+  const observed = [];
+  for (const event of mission.events) {
+    if (event.sequence >= beforeSequence) {
+      continue;
+    }
+    const source = playbookEvaluationSourceFromEvent(mission, event);
+    if (!source || !Array.isArray(source.artifacts)) {
+      continue;
+    }
+    for (const artifact of source.artifacts) {
+      if (artifact?.playbookEvaluation === undefined) {
+        continue;
+      }
+      const artifactRef = artifactReference(artifact);
+      if (!isNonEmptyString(artifactRef)) {
+        continue;
+      }
+      observed.push({ ...source, artifact, artifactRef });
+    }
+  }
+  return observed;
+}
+
+function assertPlaybookEvaluationSourceSelector(selector) {
+  if (!hasExactKeys(selector, PLAYBOOK_EVALUATION_SOURCE_SELECTOR_FIELDS)) {
+    throw new Error(
+      "Playbook evaluation source selector requires event, Assignment, Run, and Artifact identities only.",
+    );
+  }
+  for (const field of PLAYBOOK_EVALUATION_SOURCE_SELECTOR_FIELDS) {
+    if (!isNonEmptyString(selector[field])) {
+      throw new Error(
+        "Playbook evaluation source selector requires non-empty event, Assignment, Run, and Artifact identities.",
+      );
+    }
+  }
+}
+
+function playbookEvaluationSourceSelector(payload) {
+  if (
+    !isPlainObject(payload) ||
+    Object.keys(payload).some(
+      (key) => !["candidate", "evaluation"].includes(key),
+    ) ||
+    !isPlainObject(payload.candidate)
+  ) {
+    throw new Error(
+      "Playbook evaluation accepts only an empty candidate or a source selector.",
+    );
+  }
+  const selectors = [];
+  for (const [field, value] of [
+    ["candidate", payload.candidate],
+    ["evaluation", payload.evaluation],
+  ]) {
+    if (value === undefined) {
+      continue;
+    }
+    if (!isPlainObject(value)) {
+      throw new Error(
+        "Playbook evaluation accepts only an empty candidate or a source selector.",
+      );
+    }
+    const keys = Object.keys(value);
+    if (keys.length === 0) {
+      continue;
+    }
+    if (keys.length !== 1 || keys[0] !== "source") {
+      throw new Error(
+        `Playbook evaluation ${field} cannot contain caller-authored facts.`,
+      );
+    }
+    assertPlaybookEvaluationSourceSelector(value.source);
+    selectors.push(value.source);
+  }
+  if (selectors.length > 1) {
+    throw new Error(
+      "Playbook evaluation accepts at most one transport source selector.",
+    );
+  }
+  return selectors[0] ?? null;
+}
+
+function assertObservedPlaybookTransportOutput(mission, source) {
+  if (
+    source.event.missionId !== mission.id ||
+    source.event.contextPackVersion !== mission.contextPackVersion ||
+    !isNonEmptyString(source.run?.id) ||
+    source.run.status !== "COMPLETED" ||
+    !Array.isArray(source.artifacts) ||
+    source.artifacts.length === 0
+  ) {
+    throw new Error(
+      "Playbook evaluation requires a current completed transport observation from this Mission and Context Pack.",
+    );
+  }
+  const artifactRefs = source.artifacts.map(artifactReference);
+  assertDistinctNonEmptyReferences(
+    artifactRefs,
+    "Playbook evaluation transport Artifacts",
+  );
+  assertDistinctNonEmptyReferences(
+    source.event.evidenceRefs,
+    "Playbook evaluation transport Evidence",
+  );
+  const runEvidenceRefs = source.run.evidence?.map((item) => item?.ref);
+  if (!sameValue(runEvidenceRefs, source.event.evidenceRefs)) {
+    throw new Error(
+      "Playbook evaluation transport Evidence must match its completed Run output.",
+    );
+  }
+  if (
+    source.event.evidenceRefs.some((reference) =>
+      mission.invalidatedEvidenceRefs?.includes(reference),
+    ) ||
+    artifactRefs.some((reference) =>
+      mission.invalidatedArtifactRefs?.includes(reference),
+    )
+  ) {
+    throw new Error(
+      "Playbook evaluation requires current transport-observed Artifacts and Evidence.",
+    );
+  }
+}
+
+function playbookEvaluationSnapshotFromArtifact(artifact) {
+  const evaluation = artifact?.playbookEvaluation;
+  if (
+    !hasExactKeys(evaluation, PLAYBOOK_EVALUATION_ARTIFACT_FIELDS) ||
+    evaluation.schemaVersion !== PLAYBOOK_EVALUATION_ARTIFACT_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      "Playbook evaluation requires one structured transport Artifact with the current evaluation schema.",
+    );
+  }
+  const snapshot = clone(evaluation);
+  delete snapshot.schemaVersion;
+  return snapshot;
+}
+
+function assertPlaybookSnapshotReferencesObserved(mission, snapshot, source) {
+  if (snapshot.retrospective?.missionId !== mission.id) {
+    throw new Error(
+      `Playbook evaluation retrospective must bind the completed Mission ${mission.id}.`,
+    );
+  }
+  const caseResults = [
+    ...(snapshot.baseline?.caseResults ?? []),
+    ...(snapshot.candidate?.caseResults ?? []),
+  ];
+  if (
+    !Array.isArray(snapshot.baseline?.caseResults) ||
+    !Array.isArray(snapshot.candidate?.caseResults) ||
+    caseResults.length === 0 ||
+    !Array.isArray(snapshot.retrospective?.evidenceRefs)
+  ) {
+    throw new Error(
+      "Playbook evaluation requires structured Baseline, Candidate, and retrospective observations.",
+    );
+  }
+  const caseArtifactRefs = caseResults.map((result) => result?.artifactRef);
+  const evaluationEvidenceRefs = [
+    ...snapshot.retrospective.evidenceRefs,
+    ...caseResults.flatMap((result) => result?.evidenceRefs ?? []),
+  ];
+  assertDistinctNonEmptyReferences(
+    caseArtifactRefs,
+    "Playbook evaluation case Artifact references",
+  );
+  assertDistinctNonEmptyReferences(
+    evaluationEvidenceRefs,
+    "Playbook evaluation case and retrospective Evidence references",
+  );
+  const observedArtifactRefs = new Set(source.artifacts.map(artifactReference));
+  const observedEvidenceRefs = new Set(source.event.evidenceRefs);
+  if (
+    caseArtifactRefs.some((reference) => !observedArtifactRefs.has(reference)) ||
+    evaluationEvidenceRefs.some(
+      (reference) => !observedEvidenceRefs.has(reference),
+    )
+  ) {
+    throw new Error(
+      "Playbook evaluation case Artifacts and Evidence must resolve to the selected transport observation.",
+    );
+  }
+}
+
+function derivedPlaybookEvaluation(mission, selector, beforeSequence) {
+  const observations = observedPlaybookEvaluationArtifacts(
+    mission,
+    beforeSequence,
+  );
+  const selected = selector
+    ? observations.filter((observation) => {
+        const provenance = playbookEvaluationSourceProvenance(observation);
+        return PLAYBOOK_EVALUATION_SOURCE_SELECTOR_FIELDS.every(
+          (field) => provenance[field] === selector[field],
+        );
+      })
+    : observations;
+  if (selected.length !== 1) {
+    throw new Error(
+      selector
+        ? "Playbook evaluation source selector does not identify exactly one current transport observation."
+        : "Playbook evaluation requires exactly one current transport-observed structured Artifact.",
+    );
+  }
+  const source = selected[0];
+  assertObservedPlaybookTransportOutput(mission, source);
+  const snapshot = playbookEvaluationSnapshotFromArtifact(source.artifact);
+  assertPlaybookSnapshotReferencesObserved(mission, snapshot, source);
+  try {
+    createPlaybookCandidate(snapshot);
+  } catch (error) {
+    throw new Error(
+      `Playbook evaluation transport snapshot is invalid: ${error.message}`,
+    );
+  }
+  return {
+    candidate: snapshot,
+    evaluation: {
+      schemaVersion: PLAYBOOK_EVALUATION_ARTIFACT_SCHEMA_VERSION,
+      missionId: mission.id,
+      contextPackVersion: mission.contextPackVersion,
+      source: playbookEvaluationSourceProvenance(source),
+    },
+    evidenceRefs: clone(source.event.evidenceRefs),
+  };
 }
 
 function playbookReviewContext(playbook) {
@@ -829,13 +1209,49 @@ function projectPlaybookEvent(mission, event) {
         `Cannot replay event ${event.sequence}: PLAYBOOK_CANDIDATE_EVALUATED requires no current Playbook Candidate.`,
       );
     }
-    assertReplayObject(event.data.candidate, event, "candidate");
-    if (event.data.candidate.retrospective?.missionId !== mission.id) {
-      throw new Error(
-        `Cannot replay event ${event.sequence}: Playbook Candidate retrospective must bind the completed Mission ${mission.id}.`,
+    if (event.schemaVersion === EVENT_SCHEMA_VERSION) {
+      if (
+        !hasExactKeys(event.data, PLAYBOOK_EVALUATION_EVENT_FIELDS) ||
+        !hasExactKeys(
+          event.data.evaluation,
+          PLAYBOOK_EVALUATION_PROVENANCE_FIELDS,
+        ) ||
+        !isPlainObject(event.data.evaluation.source)
+      ) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: PLAYBOOK_CANDIDATE_EVALUATED requires immutable transport-observed evaluation provenance.`,
+        );
+      }
+      const selector = Object.fromEntries(
+        PLAYBOOK_EVALUATION_SOURCE_SELECTOR_FIELDS.map((field) => [
+          field,
+          event.data.evaluation.source[field],
+        ]),
       );
+      const derived = derivedPlaybookEvaluation(
+        mission,
+        selector,
+        event.sequence,
+      );
+      if (
+        !sameValue(event.data.evaluation, derived.evaluation) ||
+        !sameValue(event.data.candidate, derived.candidate) ||
+        !sameValue(event.evidenceRefs, derived.evidenceRefs)
+      ) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: PLAYBOOK_CANDIDATE_EVALUATED does not match its current transport-observed source.`,
+        );
+      }
+      mission.playbook = createPlaybookCandidate(derived.candidate);
+    } else {
+      assertReplayObject(event.data.candidate, event, "candidate");
+      if (event.data.candidate.retrospective?.missionId !== mission.id) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: Playbook Candidate retrospective must bind the completed Mission ${mission.id}.`,
+        );
+      }
+      mission.playbook = createPlaybookCandidate(event.data.candidate);
     }
-    mission.playbook = createPlaybookCandidate(event.data.candidate);
   } else if (event.type === "PLAYBOOK_PROMOTION_REQUESTED") {
     assertReplayObject(event.data.request, event, "request");
     assertCurrentPlaybookIdentity(
@@ -1053,10 +1469,24 @@ function normalizeLegacyAgent(agent) {
 }
 
 function normalizeLegacyEvent(event) {
-  if (event?.schemaVersion !== undefined) {
-    return clone(event);
-  }
   const normalized = clone(event);
+  if (
+    normalized?.schemaVersion === 2 &&
+    normalized.type === "MISSION_CREATED" &&
+    normalized.data?.brief?.releaseRequired === true &&
+    !Array.isArray(
+      normalized.data.brief.releasePlan?.requiredValidationGates,
+    )
+  ) {
+    normalized.data.brief.releasePlan = {
+      ...normalized.data.brief.releasePlan,
+      requiredValidationGates: [],
+    };
+    normalized.data.brief.releaseValidationContract = "legacy-unavailable";
+  }
+  if (event?.schemaVersion !== undefined) {
+    return normalized;
+  }
   if (normalized.type === "ASSIGNMENT_ROUTED") {
     normalized.data.assignment = normalizeLegacyAssignment(
       normalized.data.assignment,
@@ -1133,6 +1563,25 @@ function assertValidBrief(brief) {
         `Release-required Brief is missing releasePlan: ${missingReleasePlanFields.join(", ")}.`,
       );
     }
+    const requiredValidationGates =
+      brief.releasePlan?.requiredValidationGates;
+    const legacyValidationUnavailable =
+      brief.releaseValidationContract === "legacy-unavailable";
+    if (
+      !Array.isArray(requiredValidationGates) ||
+      (!legacyValidationUnavailable && requiredValidationGates.length === 0) ||
+      (legacyValidationUnavailable && requiredValidationGates.length !== 0) ||
+      requiredValidationGates.some(
+        (gateType) =>
+          typeof gateType !== "string" || gateType.trim() === "",
+      ) ||
+      new Set(requiredValidationGates).size !==
+        requiredValidationGates.length
+    ) {
+      throw new Error(
+        "Release-required Brief requires unique validation gate types.",
+      );
+    }
     if (brief.releaseAuthorized !== true) {
       throw new Error(
         "Release-required Brief must explicitly authorize release.",
@@ -1159,7 +1608,7 @@ function assertEventEnvelope(
   }
   if (
     event.schemaVersion !== undefined &&
-    event.schemaVersion !== EVENT_SCHEMA_VERSION
+    !SUPPORTED_EVENT_SCHEMA_VERSIONS.has(event.schemaVersion)
   ) {
     throw new Error(
       `Cannot replay event ${event.sequence}: event schema version is unsupported.`,
@@ -1273,6 +1722,194 @@ function assertPassingGatePayload(payload, event, field) {
       `Cannot replay event ${event.sequence}: ${event.type} has a non-passing ${field} details.passed result.`,
     );
   }
+}
+
+function isPassingGateMarker(value) {
+  return ["PASS", "PASSED"].includes(String(value).toUpperCase());
+}
+
+function transportObservedReleaseValidationGates(mission, errorPrefix) {
+  const validationNodes = (mission.execution?.nodes ?? []).filter(
+    (node) => node.assignment.validationGateType !== undefined,
+  );
+  const requiredGateTypes = mission.brief.releasePlan.requiredValidationGates;
+  const observedGateTypes = validationNodes.map(
+    (node) => node.assignment.validationGateType,
+  );
+  if (
+    validationNodes.length !== requiredGateTypes.length ||
+    new Set(observedGateTypes).size !== observedGateTypes.length ||
+    observedGateTypes.some(
+      (gateType) =>
+        typeof gateType !== "string" ||
+        !requiredGateTypes.includes(gateType),
+    )
+  ) {
+    throw new Error(
+      `${errorPrefix} requires transport-observed validation gate Evidence from one Assignment per declared gate type.`,
+    );
+  }
+
+  const gates = [];
+  for (const gateType of requiredGateTypes) {
+    const node = validationNodes.find(
+      (candidate) => candidate.assignment.validationGateType === gateType,
+    );
+    const outcomes = (node?.artifacts ?? []).filter(
+      (artifact) => artifact?.validationOutcome !== undefined,
+    );
+    if (node?.status !== "COMPLETED" || outcomes.length !== 1) {
+      throw new Error(
+        `${errorPrefix}: ${gateType} requires one completed transport-observed validation outcome.`,
+      );
+    }
+    const outcome = outcomes[0].validationOutcome;
+    if (
+      !outcome ||
+      typeof outcome !== "object" ||
+      Array.isArray(outcome) ||
+      outcome.type !== gateType ||
+      !isPassingGateMarker(outcome.status) ||
+      !isPassingGateMarker(outcome.outcome) ||
+      typeof outcome.evidenceRef !== "string" ||
+      outcome.evidenceRef.trim() === "" ||
+      !node.evidenceRefs.includes(outcome.evidenceRef)
+    ) {
+      throw new Error(
+        `${errorPrefix}: ${gateType} gate must contain passing transport-observed validation gate Evidence.`,
+      );
+    }
+    gates.push({
+      type: outcome.type,
+      status: outcome.status,
+      outcome: outcome.outcome,
+      evidenceRef: outcome.evidenceRef,
+    });
+  }
+  return gates;
+}
+
+export function deriveTransportObservedReleaseValidation(mission) {
+  if (!mission?.brief?.releaseRequired) {
+    throw new Error(
+      "Transport-observed release validation requires a release Mission.",
+    );
+  }
+  const gates = transportObservedReleaseValidationGates(
+    mission,
+    "Release validation",
+  );
+  return deepFreeze({
+    gates: clone(gates),
+    evidenceRefs: gates.map((gate) => gate.evidenceRef),
+  });
+}
+
+function assertTransportObservedReleaseValidationGates(mission, event, gates) {
+  const observedGates = transportObservedReleaseValidationGates(
+    mission,
+    `Cannot replay event ${event.sequence}: VALIDATION_PASSED`,
+  );
+  if (!sameValue(observedGates, gates)) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: typed validation gates must exactly match transport-observed validation gate Evidence.`,
+    );
+  }
+}
+
+function assertReleaseValidationAssignments(mission, execution) {
+  if (
+    !mission.brief.releaseRequired ||
+    !execution ||
+    mission.brief.releaseValidationContract === "legacy-unavailable"
+  ) {
+    return;
+  }
+  const requiredGateTypes = mission.brief.releasePlan.requiredValidationGates;
+  const assignedGateTypes = execution.nodes
+    .map((node) => node.assignment.validationGateType)
+    .filter((gateType) => gateType !== undefined);
+  if (
+    assignedGateTypes.length !== requiredGateTypes.length ||
+    new Set(assignedGateTypes).size !== assignedGateTypes.length ||
+    assignedGateTypes.some(
+      (gateType) =>
+        typeof gateType !== "string" ||
+        gateType.trim() === "" ||
+        !requiredGateTypes.includes(gateType),
+    )
+  ) {
+    throw new Error(
+      "Release Plan requires one validation Assignment per declared gate.",
+    );
+  }
+}
+
+function assertRequiredReleaseValidationGates(mission, event) {
+  if (
+    !mission.brief.releaseRequired ||
+    mission.brief.releaseValidationContract === "legacy-unavailable"
+  ) {
+    return;
+  }
+
+  const requiredGateTypes = mission.brief.releasePlan.requiredValidationGates;
+  const gates = event.data.validation.gates;
+  if (!Array.isArray(gates)) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: VALIDATION_PASSED requires the exact declared validation gate types.`,
+    );
+  }
+  const gateTypes = gates.map((gate) => gate?.type);
+  if (
+    gates.length !== requiredGateTypes.length ||
+    gateTypes.some(
+      (gateType) =>
+        typeof gateType !== "string" ||
+        gateType.trim() === "" ||
+        !requiredGateTypes.includes(gateType),
+    ) ||
+    new Set(gateTypes).size !== gateTypes.length
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: VALIDATION_PASSED requires the exact declared validation gate types.`,
+    );
+  }
+
+  for (const gate of gates) {
+    if (!isPassingGateMarker(gate.status)) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: VALIDATION_PASSED has a non-passing validation gate status.`,
+      );
+    }
+    if (!isPassingGateMarker(gate.outcome)) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: VALIDATION_PASSED has a non-passing validation gate outcome.`,
+      );
+    }
+    if (gate.passed !== undefined && gate.passed !== true) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: VALIDATION_PASSED has a non-passing validation gate result.`,
+      );
+    }
+  }
+
+  const gateEvidenceRefs = gates.map((gate) => gate.evidenceRef);
+  if (
+    gateEvidenceRefs.some(
+      (reference) => typeof reference !== "string" || reference.trim() === "",
+    ) ||
+    new Set(gateEvidenceRefs).size !== gateEvidenceRefs.length ||
+    gateEvidenceRefs.length !== event.evidenceRefs.length ||
+    gateEvidenceRefs.some(
+      (reference, index) => reference !== event.evidenceRefs[index],
+    )
+  ) {
+    throw new Error(
+      `Cannot replay event ${event.sequence}: typed validation gate Evidence must exactly match event Evidence.`,
+    );
+  }
+  assertTransportObservedReleaseValidationGates(mission, event, gates);
 }
 
 function assertBlockDetails(block, errorPrefix) {
@@ -1399,19 +2036,10 @@ function assertCurrentReleaseDecision(
     evidenceRefs.every(
       (reference, index) => reference === current.evidenceRefs[index],
     );
-  const snapshotMatches =
-    approval.contextPackVersion === current.contextPackVersion &&
-    artifactReference(approval.candidate) ===
-      artifactReference(current.candidate) &&
-    JSON.stringify(approval.candidate) ===
-      JSON.stringify(current.candidate) &&
-    JSON.stringify(approval.candidateArtifacts) ===
-      JSON.stringify(current.candidateArtifacts) &&
-    JSON.stringify(approval.evidenceRefs) ===
-      JSON.stringify(current.evidenceRefs) &&
-    approval.residualRisk === current.residualRisk &&
-    approval.intendedExternalAction === current.intendedExternalAction &&
-    approval.rollbackCommitment === current.rollbackCommitment;
+  const snapshot = clone(approval);
+  delete snapshot.decision;
+  delete snapshot.summary;
+  const snapshotMatches = sameValue(snapshot, current);
   if (
     !sameEvidence ||
     !snapshotMatches ||
@@ -1509,6 +2137,14 @@ function projectAgentEvent(mission, event) {
     } catch (error) {
       throw new Error(
         `Cannot replay event ${event.sequence}: ${error.message}`,
+      );
+    }
+    if (
+      event.schemaVersion === EVENT_SCHEMA_VERSION &&
+      !sameValue(event.data.assignment.contextSlice, mission.context)
+    ) {
+      throw new Error(
+        `Cannot replay event ${event.sequence}: routed Assignment context must match the active source-backed Context Pack.`,
       );
     }
     assertReplayString(event.data.agent.roleId, event, "agent role");
@@ -1709,7 +2345,9 @@ function syncMissionExecutionOutputs(mission) {
     (node) => node.status === "COMPLETED",
   );
   const candidateNodes = completedNodes.filter(
-    (node) => node.assignment.workKind !== "review",
+    (node) =>
+      node.assignment.workKind !== "review" &&
+      node.assignment.validationGateType === undefined,
   );
   const reviewNodes = completedNodes.filter(
     (node) => node.assignment.workKind === "review",
@@ -2169,13 +2807,19 @@ function projectCorrectionEvent(mission, event) {
       );
     }
     assertReplayObject(event.data.context, event, "context");
+    const revisedContext =
+      event.schemaVersion === EVENT_SCHEMA_VERSION
+        ? assertSourceBackedContextPack(event.data.context, {
+            contextPackVersion: event.contextPackVersion,
+          })
+        : event.data.context;
     invalidateCorrectionCandidate(mission, event, {
       includeEventEvidence: false,
     });
     const previousVersion = mission.contextPackVersion;
     mission.status = "CONTEXT_READY";
     mission.contextPackVersion = event.contextPackVersion;
-    mission.context = clone(event.data.context);
+    mission.context = clone(revisedContext);
     mission.plan = null;
     mission.execution = null;
     mission.executionReviewEvidenceRefs = null;
@@ -2426,8 +3070,28 @@ function projectMission(events, expectedMissionId) {
         `Cannot replay event ${event.sequence}: ${event.type} requires ${projection.field}.`,
       );
     }
+    let projectedValue = event.data[projection.field];
+    if (
+      event.type === "CONTEXT_CAPTURED" &&
+      event.schemaVersion === EVENT_SCHEMA_VERSION
+    ) {
+      projectedValue = assertSourceBackedContextPack(event.data.context, {
+        contextPackVersion: event.contextPackVersion,
+      });
+    }
+    if (
+      event.type === "PLAN_ACCEPTED" &&
+      event.schemaVersion === EVENT_SCHEMA_VERSION
+    ) {
+      assertPlanBoundToContext(event.data.plan, mission.context, event);
+    }
     if (event.type === "REVIEW_PASSED") {
       assertPassingGatePayload(event.data.review, event, "review");
+      if (mission.brief.releaseRequired && !mission.execution) {
+        throw new Error(
+          `Cannot replay event ${event.sequence}: release-required review requires transport-bound independent reviewer Evidence.`,
+        );
+      }
       if (mission.execution) {
         assertCurrentIndependentReviewerEvidence(mission, event);
       }
@@ -2436,6 +3100,7 @@ function projectMission(events, expectedMissionId) {
     if (event.type === "VALIDATION_PASSED") {
       assertPassingGatePayload(event.data.validation, event, "validation");
       assertDistinctReleaseGateEvidence(mission, event);
+      assertRequiredReleaseValidationGates(mission, event);
     }
     if (projection.requiresEvidence && event.evidenceRefs.length === 0) {
       throw new Error(
@@ -2495,15 +3160,16 @@ function projectMission(events, expectedMissionId) {
       mission.brief.releaseRequired
         ? "APPROVAL_REQUIRED"
         : projection.to;
-    mission[projection.field] = clone(event.data[projection.field]);
+    mission[projection.field] = clone(projectedValue);
     if (event.type === "PLAN_ACCEPTED") {
       mission.execution = null;
       mission.executionReviewEvidenceRefs = null;
-      if (event.data.plan.taskGraph) {
+      if (projectedValue.taskGraph) {
         try {
-          mission.execution = createTaskExecution(event.data.plan.taskGraph, {
+          mission.execution = createTaskExecution(projectedValue.taskGraph, {
             requireIndependentReview: true,
           });
+          assertReleaseValidationAssignments(mission, mission.execution);
           for (const node of mission.execution.nodes) {
             assertAssignmentWithinMissionAuthority(
               mission,
@@ -2532,6 +3198,11 @@ function projectMission(events, expectedMissionId) {
           mission.reviewEvidenceRefs ?? [],
           event.evidenceRefs,
         ),
+        validation: {
+          summary: event.data.validation.summary,
+          gates: clone(event.data.validation.gates),
+          evidenceRefs: clone(event.evidenceRefs),
+        },
         ...clone(mission.brief.releasePlan),
       };
     }
@@ -3603,7 +4274,11 @@ export function createMissionOrchestrator({
       }
       const { assignment, actor, reason } = input;
       assertAuditMetadata({ actor, reason });
-      const routing = agentRouter.route(assignment);
+      const missionContext = getMission(missionId).context;
+      const routing = agentRouter.route({
+        ...clone(assignment),
+        contextSlice: clone(missionContext),
+      });
 
       await writeCoordinator.runExclusive(() =>
         appendAgentEvent(missionId, {
@@ -3628,6 +4303,13 @@ export function createMissionOrchestrator({
             if (mission.assignment) {
               throw new Error(
                 `Mission already has Assignment ${mission.assignment.id}.`,
+              );
+            }
+            if (
+              !sameValue(routing.assignment.contextSlice, mission.context)
+            ) {
+              throw new Error(
+                "Assignment context changed before dispatch; refresh the active Context Pack.",
               );
             }
             assertAssignmentWithinMissionAuthority(mission, routing);
@@ -3749,6 +4431,14 @@ export function createMissionOrchestrator({
         if (!command) {
           throw new Error(`Unknown command: ${type}.`);
         }
+        if (
+          mission.brief.releaseValidationContract === "legacy-unavailable" &&
+          !["BLOCK_MISSION", "CANCEL_MISSION"].includes(type)
+        ) {
+          throw new Error(
+            "The legacy release validation contract is unavailable; this history is read-only except for block or cancel controls.",
+          );
+        }
         if (type === "RECORD_PLAYBOOK_INDEPENDENT_REVIEW") {
           throw new Error(
             "RECORD_PLAYBOOK_INDEPENDENT_REVIEW must be dispatched through the transport-backed independent review path.",
@@ -3860,6 +4550,41 @@ export function createMissionOrchestrator({
           throw new Error(`${type} requires current Evidence.`);
         }
         let eventPayload = payload;
+        let eventEvidenceRefs = clone(evidenceRefs);
+        if (["CAPTURE_CONTEXT", "REVISE_CONTEXT"].includes(type)) {
+          const contextPackVersion =
+            type === "REVISE_CONTEXT"
+              ? mission.contextPackVersion + 1
+              : mission.contextPackVersion;
+          eventPayload = {
+            context: assertSourceBackedContextPack(payload.context, {
+              contextPackVersion,
+            }),
+          };
+        }
+        if (type === "ACCEPT_PLAN") {
+          eventPayload = {
+            plan: bindPlanToContext(payload.plan, mission.context),
+          };
+        }
+        if (type === "EVALUATE_PLAYBOOK_CANDIDATE") {
+          if (!Array.isArray(evidenceRefs) || evidenceRefs.length !== 0) {
+            throw new Error(
+              "Playbook evaluation derives Evidence from its transport observation and does not accept caller Evidence.",
+            );
+          }
+          const selector = playbookEvaluationSourceSelector(payload);
+          const derived = derivedPlaybookEvaluation(
+            mission,
+            selector,
+            mission.events.length + 1,
+          );
+          eventPayload = {
+            candidate: derived.candidate,
+            evaluation: derived.evaluation,
+          };
+          eventEvidenceRefs = derived.evidenceRefs;
+        }
         if (type === "REQUEST_PLAYBOOK_PROMOTION") {
           eventPayload = {
             request: currentPlaybookIdentity(mission.playbook),
@@ -3929,7 +4654,7 @@ export function createMissionOrchestrator({
             type === "REVISE_CONTEXT"
               ? mission.contextPackVersion + 1
               : mission.contextPackVersion,
-          evidenceRefs: clone(evidenceRefs),
+          evidenceRefs: clone(eventEvidenceRefs),
           data: clone(eventPayload),
         };
         projectMission([...mission.events, event], missionId);

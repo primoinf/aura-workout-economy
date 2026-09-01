@@ -2,6 +2,38 @@
 
 Timezone: Asia/Bangkok (`+07:00`)
 
+## 2026-09-02 04:52:10 +07:00
+
+- Closed TASK-050. The owner reviewed the remaining options and explicitly waived the final-strict independent review call, then authorized the local commit. The unit terminal state is `parent-completed` / `final-strict-not-achieved` with 0 of 3 review calls used, no reservation taken, and no independent reviewer verdict on record. The candidate was review-ready with no known blocker.
+- Committed the exact 21-path frozen candidate plus TASK-050 assurance and tracker records. Re-verified zero drift across all 21 hashes immediately before staging. Explicitly excluded the unrelated Claude routing configuration, generated `dist/` and Graphify output, runtime data, and the separate `nihongo-dojo` repository.
+- Bound validation: 202/202 Node tests with exit 0, clean `npm.cmd ci`, Vite 8.2.2 production build, `npm audit` 0 vulnerabilities, `node --check` on 16 files, scoped diff/whitespace, secret scan, manifest rehash, and desktop/mobile browser QA. Browser Tab traversal and native cancel confirmation remain recorded tooling gaps.
+- Updated `.planning/mission-control-push-readiness-assurance.md`, `.planning/HANDOFF.json`, `.planning/.continue-here.md`, `task-board.md`, and `hotcache.md` to the closed state, including the recorded review gap. No push, merge, release, or deployment was performed; the local commit stack remains unpushed.
+
+## 2026-09-02 04:46:49 +07:00
+
+- Completed TASK-050 candidate verification and froze the behavior candidate at `sha256:dbac0807...8c500` over 21 whole-file records. Full `node --test` passed 202/202 with exit 0, clean `npm.cmd ci` installed 15 packages with 0 audit vulnerabilities, the Vite 8.2.2 production build passed, and syntax, scoped diff/whitespace, secret scan, manifest rehash, and desktop/mobile browser QA all passed.
+- Recorded final-strict readiness as `REVIEW_READY: yes` with no blockers and `REVIEW_CALLS_USED: 0` of max 3, and prepared `.planning/mission-control-push-readiness-review-packet.md` with reservation id `task050-review-01-01a05ea1`. The owner then deferred the independent review call, so the unit is paused immediately before review rather than blocked by a defect.
+- Re-synchronized the stale tracker and handoff records that still described the superseded TASK-049 checkpoint: rewrote `.planning/HANDOFF.json` and `.planning/.continue-here.md` to the TASK-050 phase 0-7 state with base and HEAD both `784ac616ebf3585dcee6dd558e7bf09a2890559b`, updated the TASK-050 row and header timestamp in `task-board.md`, and refreshed `hotcache.md`. Verified zero drift across all 21 candidate hashes before and after these edits; every changed file is administrative metadata outside the behavior candidate.
+- No production code, staging, commit, push, merge, release, or deployment was performed.
+
+## 2026-09-02 03:30:52 +07:00
+
+- Resumed the only pending item, TASK-050, from its durable Solweaver final-strict ledger. Reconciled the interrupted release, Context, and Playbook changes and recovered hash-bound RED→GREEN receipts from the persisted 2026-08-31 parent rollout.
+- Current focused release/Context/Playbook/bootstrap/view verification passes 135/135. The completed behavior removes production simulation, requires typed transport-observed release gates and independent review, rejects placeholder Context, and derives Playbook evaluation facts from current Mission transport Artifacts/Evidence.
+- Closed the clean-install security delta by updating Mission Control from Vite 5 to `^8.2.2` and refreshing its standalone lockfile; `npm.cmd audit --json` now reports 0 vulnerabilities. Full candidate tests/build/isolated install/browser QA and final-strict review remain pending; no commit, push, merge, release, or deployment was performed.
+
+## 2026-08-28 16:00:00 +07:00
+
+- Started TASK-050 in Solweaver team mode. Loaded the workspace, Solweaver, TDD, test-quality, and final-strict contracts; recorded `TDD_REQUIRED: yes` for the production transport, release-gate, Context Pack, Playbook evaluation, and approval-demand seams.
+- Bound the starting code state to `main` at `784ac616ebf3585dcee6dd558e7bf09a2890559b`, recorded the pre-existing dirty/untracked workspace exclusions, and opened the durable final-strict assurance unit in `.planning/mission-control-push-readiness-assurance.md`.
+- The first delegated slice owns only the fail-closed production transport bootstrap and its focused tests. Parent retains orchestration, shared tracker/assurance files, release/Evidence contracts, integration, and candidate-wide verification. No production code, commit, push, merge, release, or deployment has occurred yet.
+
+## 2026-08-28 03:11:21 +07:00
+
+- Queued TASK-050 and recorded the durable Mission Control push-readiness remediation plan in `.planning/mission-control-push-readiness.md` after reviewing the 12 local commits from `origin/main` to `784ac61`.
+- The plan prioritizes fail-closed production transport, release-gate integrity, evidence-backed Context Packs and Playbook evaluation, correct human approval demand, and committed workspace hygiene. Behavior changes must follow TDD; the integrated audit/release-integrity candidate requires final-strict assurance.
+- Updated `hotcache.md`, `task-board.md`, and this log only. No production code, staging, commit, push, merge, release, or deployment was performed.
+
 ## 2026-08-28 02:39:32 +07:00
 
 - Received explicit owner authorization to create the scoped Tickets 06-07 checkpoint commit. Reconfirmed the reviewed behavior hashes are unchanged and kept the authorization limited to the exact 36 paths and commit message `feat: complete mission control playbook and operations UI`.
@@ -77,17 +109,17 @@ Timezone: Asia/Bangkok (`+07:00`)
 - Validation passed: focused 11/11, full 103/103 Node tests, JavaScript syntax checks, Vite production build, and staged/scoped `git diff --check`. Live Browser/Chrome/Playwright control was unavailable; prior visual/control/console checks remain recorded and full keyboard Tab traversal is the unavoidable gap.
 - Created scoped commit `baac8dd` containing only the six Ticket 05 Mission Control source/test files. Updated `task-board.md` and `hotcache.md`; no deployment or unrelated changes.
 
-## 2026-08-14 02:30:29 +07:00
-
-- Rechecked Mission Control Ticket 05 from the current working tree. `npm.cmd test` passed 98/98, `npm.cmd run build` passed, and scoped `git diff --check` passed with only LF/CRLF warnings; direct `npm` invocation was blocked by PowerShell execution policy.
-- Built a graphify snapshot for `codex-mission-control/` (449 nodes, 1,018 extracted edges, 15 communities) to confirm the implementation seam and related test coverage.
-- Ticket 05 remains `DOING`: desktop/mobile browser and accessibility/focus/overflow/console QA, independent correctness/security review, any fixes, tracker closure, and a scoped commit remain.
-
 ## 2026-08-14 03:01:46 +07:00
 
 - Completed Ticket 05 browser QA on desktop and mobile: visual layout, overflow, control names, Decision Room/Mission Flow journey, and browser console passed. The Browser surface did not advance focus on Tab, so full keyboard tab-order verification remains a tooling gap.
 - Manual independent trace reproduced and fixed acceptance of duplicate/undeclared Decision Room participant roles; added a regression test. Validation passed with 99/99 Node tests, JavaScript syntax checks, Vite production build, and scoped diff checks.
 - Updated Ticket 05 acceptance/tracker state and committed only the scoped Mission Control files as `6f87dd1`. No deployment; unrelated workspace changes were preserved.
+
+## 2026-08-14 02:30:29 +07:00
+
+- Rechecked Mission Control Ticket 05 from the current working tree. `npm.cmd test` passed 98/98, `npm.cmd run build` passed, and scoped `git diff --check` passed with only LF/CRLF warnings; direct `npm` invocation was blocked by PowerShell execution policy.
+- Built a graphify snapshot for `codex-mission-control/` (449 nodes, 1,018 extracted edges, 15 communities) to confirm the implementation seam and related test coverage.
+- Ticket 05 remains `DOING`: desktop/mobile browser and accessibility/focus/overflow/console QA, independent correctness/security review, any fixes, tracker closure, and a scoped commit remain.
 
 ## 2026-08-12 00:18:54 +07:00
 
