@@ -83,7 +83,8 @@ function Invoke-WarmCodex {
         [string]$ExpectedLabel,
         [string]$OrcaExe = (Get-DefaultOrcaExe),
         [int]$TimeoutSeconds = 180,
-        [int]$PollSeconds = 5
+        [int]$PollSeconds = 5,
+        [string]$HandleFile
     )
     $computed = Get-CodexStatusLabel -Model $Model -Effort $Effort
     if (-not $ExpectedLabel) { $ExpectedLabel = $computed }
@@ -92,6 +93,7 @@ function Invoke-WarmCodex {
     $created = ConvertFrom-OrcaJson (Invoke-Orca -OrcaExe $OrcaExe -Arguments @('terminal', 'create', '--worktree', 'active', '--shell', 'powershell.exe', '--title', $Title, '--command', $command, '--json'))
     if (-not $created.ok) { throw "orca terminal create failed: $((Get-OptionalProperty $created 'error').message)" }
     $handle = $created.result.terminal.handle
+    if ($HandleFile) { Set-Content -LiteralPath $HandleFile -Value $handle -Encoding Ascii }
     $attempts = [Math]::Max(1, [int][Math]::Ceiling($TimeoutSeconds / [double]$PollSeconds))
     try {
         $label = $null
@@ -202,7 +204,7 @@ function Get-ChangedPath {
         $entry = $entries[$i]
         $code = $entry.Substring(0, 2)
         $paths.Add($entry.Substring(3))
-        if ($code[0] -eq 'R' -or $code[0] -eq 'C') {
+        if ($code[0] -eq 'R' -or $code[0] -eq 'C' -or $code[1] -eq 'R' -or $code[1] -eq 'C') {
             $i++
             $paths.Add($entries[$i])
         }
@@ -292,11 +294,16 @@ function New-PipelineTaskSpec {
         [Parameter(Mandatory = $true)][string]$RunDir,
         [Parameter(Mandatory = $true)][int]$Round,
         [string]$FindingsPath,
-        [string]$RolesDir = (Get-DefaultRolesDir)
+        [string]$RolesDir = (Get-DefaultRolesDir),
+        [string]$ExpectedBriefSha256
     )
     $runDirNorm = $RunDir.Replace('\', '/').TrimEnd('/')
     $briefPath = Join-Path $RunDir 'brief.md'
     if (-not (Test-Path -LiteralPath $briefPath)) { throw "brief not found: $briefPath" }
+    if ($ExpectedBriefSha256) {
+        $actualBriefSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $briefPath).Hash
+        if ($actualBriefSha -ne $ExpectedBriefSha256) { throw "brief.md changed since its hash was recorded: expected $ExpectedBriefSha256, got $actualBriefSha" }
+    }
     $rolePath = Join-Path $RolesDir "$Role.md"
     if (-not (Test-Path -LiteralPath $rolePath)) { throw "role file not found: $rolePath" }
     $roleText = (Get-Content -LiteralPath $rolePath -Raw -Encoding UTF8).Replace('{RUN_DIR}', $runDirNorm).Replace('{ROUND}', "$Round")
@@ -344,10 +351,13 @@ function Start-PipelineTask {
         [string]$FindingsPath,
         [string]$Terminal,
         [string]$OrcaExe = (Get-DefaultOrcaExe),
-        [string]$RolesDir = (Get-DefaultRolesDir)
+        [string]$RolesDir = (Get-DefaultRolesDir),
+        [string]$ExpectedBriefSha256
     )
     if ($Role -ne 'verdict' -and -not $Terminal) { throw "Terminal is required for the $Role role" }
-    $spec = New-PipelineTaskSpec -Role $Role -RunDir $RunDir -Round $Round -FindingsPath $FindingsPath -RolesDir $RolesDir
+    $spec = New-PipelineTaskSpec -Role $Role -RunDir $RunDir -Round $Round -FindingsPath $FindingsPath -RolesDir $RolesDir -ExpectedBriefSha256 $ExpectedBriefSha256
+    $staleReport = Join-Path $RunDir "$Role-r$Round.md"
+    if (Test-Path -LiteralPath $staleReport) { Remove-Item -LiteralPath $staleReport -Force }
     $title = "$Role-$(Split-Path -Leaf $RunDir)-r$Round"
     if ($Role -eq 'verdict') {
         $startArgs = @('orchestration', 'worker-start', '--spec', $spec, '--task-title', $title, '--worktree', 'current', '--agent', 'claude', '--model', 'claude-opus-5-5', '--effort', 'max', '--timeout-ms', '180000', '--json')
@@ -404,4 +414,11 @@ function Submit-PendingCodexPaste {
         if ($screen -notmatch '\[Pasted Content') { return $true }
     }
     return $false
+}
+
+function Get-SnapshotFingerprint {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Snapshot)
+    $parts = foreach ($name in @('head', 'status', 'diffSha256', 'untrackedSha256')) { [string](Get-OptionalProperty $Snapshot $name) }
+    return (Get-Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))))
 }

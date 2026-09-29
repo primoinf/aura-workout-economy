@@ -112,3 +112,17 @@ Describe 'report-decision.ps1' {
         $LASTEXITCODE | Should Be 1
     }
 }
+
+Describe 'Final review fixes: brief integrity' {
+    It 'accepts a brief whose SHA-256 matches the recorded value' {
+        $dir = New-RunDir
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir 'brief.md')).Hash
+        { New-PipelineTaskSpec -Role verifier -RunDir $dir -Round 1 -RolesDir $rolesDir -ExpectedBriefSha256 $hash } | Should Not Throw
+    }
+    It 'throws when the brief changed after its hash was recorded' {
+        $dir = New-RunDir
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir 'brief.md')).Hash
+        Add-Content -LiteralPath (Join-Path $dir 'brief.md') -Value 'Ownership: ./' -Encoding UTF8
+        { New-PipelineTaskSpec -Role verifier -RunDir $dir -Round 1 -RolesDir $rolesDir -ExpectedBriefSha256 $hash } | Should Throw 'brief.md changed'
+    }
+}

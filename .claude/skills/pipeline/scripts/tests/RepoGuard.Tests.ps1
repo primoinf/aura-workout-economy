@@ -112,3 +112,44 @@ Describe 'entry scripts' {
         (($out | Out-String) | ConvertFrom-Json).identical | Should Be $false
     }
 }
+
+Describe 'Final review fixes: repo guards' {
+    It 'reports both sides of a working-tree rename found through intent-to-add' {
+        $repo = New-TestRepo
+        Move-Item -LiteralPath (Join-Path $repo 'tracked.txt') -Destination (Join-Path $repo 'renamed.txt')
+        & git -C $repo add -N renamed.txt
+        $v = @(Get-OwnershipViolation -AllowedPaths @('src/') -RepoPath $repo)
+        (@($v | Sort-Object) -join '|') | Should BeExactly 'renamed.txt|tracked.txt'
+    }
+    It 'handles a working-tree rename whose source name has two characters' {
+        $repo = New-TestRepo
+        Set-Content -LiteralPath (Join-Path $repo 'ab') -Value 'x' -Encoding Ascii
+        & git -C $repo add ab
+        & git -C $repo commit -q -m ab
+        Move-Item -LiteralPath (Join-Path $repo 'ab') -Destination (Join-Path $repo 'cd.txt')
+        & git -C $repo add -N cd.txt
+        $v = @(Get-OwnershipViolation -AllowedPaths @('src/') -RepoPath $repo)
+        (@($v | Sort-Object) -join '|') | Should BeExactly 'ab|cd.txt'
+    }
+    It 'repo-snapshot.ps1 exits 3 when the saved baseline does not match the expected fingerprint' {
+        $repo = New-TestRepo
+        $script = Join-Path $PSScriptRoot '..\repo-snapshot.ps1'
+        $before = Join-Path $TestDrive 'fp-before.json'
+        $printed = (& $script -RepoPath $repo -OutFile $before | Out-String) | ConvertFrom-Json
+        $fingerprint = $printed.fingerprint
+        $fingerprint | Should Match '^[0-9a-f]{64}$'
+        Set-Content -LiteralPath (Join-Path $repo 'tracked.txt') -Value 'changed' -Encoding Ascii
+        $tampered = Get-RepoSnapshot -RepoPath $repo
+        $tampered | ConvertTo-Json | Set-Content -LiteralPath $before -Encoding UTF8
+        & $script -RepoPath $repo -CompareTo $before -ExpectFingerprint $fingerprint | Out-Null
+        $LASTEXITCODE | Should Be 3
+    }
+    It 'repo-snapshot.ps1 compares normally when the baseline fingerprint matches' {
+        $repo = New-TestRepo
+        $script = Join-Path $PSScriptRoot '..\repo-snapshot.ps1'
+        $before = Join-Path $TestDrive 'fp-ok.json'
+        $fingerprint = ((& $script -RepoPath $repo -OutFile $before | Out-String) | ConvertFrom-Json).fingerprint
+        & $script -RepoPath $repo -CompareTo $before -ExpectFingerprint $fingerprint | Out-Null
+        $LASTEXITCODE | Should Be 0
+    }
+}

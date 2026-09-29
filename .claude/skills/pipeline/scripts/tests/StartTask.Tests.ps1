@@ -118,3 +118,29 @@ Describe 'Start-PipelineTask pending paste recovery' {
         }
     }
 }
+
+Describe 'Final review fixes: dispatch hygiene' {
+    Context 'a stale report from an earlier attempt exists' {
+        Mock -ModuleName Pipeline Invoke-Orca { $global:CreateOk } -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:StartOk } -ParameterFilter { $Arguments[1] -eq 'worker-start' }
+
+        It 'removes the role report for this round before dispatching' {
+            $dir = New-RunDir
+            $stale = Join-Path $dir 'verifier-r1.md'
+            Set-Content -LiteralPath $stale -Value 'RESULT: PASS' -Encoding UTF8
+            Start-PipelineTask -Role verifier -RunDir $dir -Round 1 -Terminal 'term_v' -OrcaExe 'orca.exe' -RolesDir $global:RolesDirForTests | Out-Null
+            Test-Path -LiteralPath $stale | Should Be $false
+        }
+    }
+
+    Context 'brief hash passed through' {
+        Mock -ModuleName Pipeline Invoke-Orca { $global:CreateOk } -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:StartOk } -ParameterFilter { $Arguments[1] -eq 'worker-start' }
+
+        It 'refuses to dispatch when the brief no longer matches the recorded hash' {
+            $dir = New-RunDir
+            { Start-PipelineTask -Role worker -RunDir $dir -Round 1 -Terminal 'term_w' -OrcaExe 'orca.exe' -RolesDir $global:RolesDirForTests -ExpectedBriefSha256 ('0' * 64) } | Should Throw 'brief.md changed'
+            Assert-MockCalled Invoke-Orca -ModuleName Pipeline -Exactly -Times 0 -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        }
+    }
+}
