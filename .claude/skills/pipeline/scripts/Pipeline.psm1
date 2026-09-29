@@ -280,3 +280,57 @@ function Compare-RepoSnapshot {
     }
     return $changed.ToArray()
 }
+
+function Get-DefaultRolesDir {
+    return (Join-Path (Split-Path -Parent $PSScriptRoot) 'roles')
+}
+
+function New-PipelineTaskSpec {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('worker', 'verifier', 'verdict')][string]$Role,
+        [Parameter(Mandatory = $true)][string]$RunDir,
+        [Parameter(Mandatory = $true)][int]$Round,
+        [string]$FindingsPath,
+        [string]$RolesDir = (Get-DefaultRolesDir)
+    )
+    $runDirNorm = $RunDir.Replace('\', '/').TrimEnd('/')
+    $briefPath = Join-Path $RunDir 'brief.md'
+    if (-not (Test-Path -LiteralPath $briefPath)) { throw "brief not found: $briefPath" }
+    $rolePath = Join-Path $RolesDir "$Role.md"
+    if (-not (Test-Path -LiteralPath $rolePath)) { throw "role file not found: $rolePath" }
+    $roleText = (Get-Content -LiteralPath $rolePath -Raw -Encoding UTF8).Replace('{RUN_DIR}', $runDirNorm).Replace('{ROUND}', "$Round")
+    $brief = Get-Content -LiteralPath $briefPath -Raw -Encoding UTF8
+    $inputs = New-Object System.Collections.Generic.List[string]
+    if ($Role -eq 'worker') {
+        if ($Round -gt 1) {
+            if (-not $FindingsPath) { throw 'FindingsPath is required for worker rounds after the first' }
+            $inputs.Add('Findings to address: ' + $FindingsPath.Replace('\', '/'))
+        }
+    }
+    else {
+        $inputs.Add("Diff: $runDirNorm/diff-r$Round.patch")
+        $inputs.Add("Untracked files list: $runDirNorm/untracked-r$Round.txt")
+        if ($Role -eq 'verdict') { $inputs.Add("Verifier report: $runDirNorm/verifier-r$Round.md") }
+    }
+    if ($inputs.Count -eq 0) { $inputs.Add('None') }
+    $header = "PIPELINE ROLE: $($Role.ToUpperInvariant())  RUN DIR: $runDirNorm  ROUND: $Round"
+    $spec = $header + "`n`n" + $roleText.Trim() + "`n`n=== BRIEF ===`n" + $brief.Trim() + "`n`n=== ROUND INPUTS ===`n" + ($inputs -join "`n") + "`n"
+    return $spec.Replace('"', "'")
+}
+
+function Get-ReportDecision {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('verifier', 'verdict')][string]$Kind
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { throw "report not found: $Path" }
+    $first = Get-Content -LiteralPath $Path -Encoding UTF8 -TotalCount 1
+    if ($null -eq $first) { $first = '' }
+    $first = ([string]$first).TrimStart([char]0xFEFF).Trim()
+    if ($Kind -eq 'verifier') { $pattern = '^RESULT: (PASS|FAIL)$' } else { $pattern = '^VERDICT: (APPROVE|CHANGES_REQUESTED)$' }
+    $match = [regex]::Match($first, $pattern)
+    if (-not $match.Success) { throw "invalid $Kind report header in ${Path}: '$first'" }
+    return $match.Groups[1].Value
+}
