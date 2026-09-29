@@ -168,3 +168,115 @@ function Wait-PipelineWorkerDone {
         return [pscustomobject]@{ kind = 'attention'; dispatchId = $DispatchId; deliveryId = $deliveryId; outcome = $null; body = $null; messages = $messages }
     }
 }
+
+function Invoke-Git {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $previous = $null
+    try { $previous = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+    try {
+        $output = & git -C $RepoPath @Arguments 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE" }
+        return ($output | Out-String)
+    }
+    finally {
+        if ($null -ne $previous) { try { [Console]::OutputEncoding = $previous } catch { } }
+    }
+}
+
+function Split-NulList {
+    param([string]$Text)
+    return @($Text.Split([char]0) | Where-Object { $_.Trim().Length -gt 0 })
+}
+
+function Get-ChangedPath {
+    [CmdletBinding()]
+    param([string]$RepoPath = (Get-Location).Path)
+    $entries = @(Split-NulList (Invoke-Git -RepoPath $RepoPath -Arguments @('status', '--porcelain=v1', '-uall', '-z')))
+    $paths = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $entries.Count) {
+        $entry = $entries[$i]
+        $code = $entry.Substring(0, 2)
+        $paths.Add($entry.Substring(3))
+        if ($code[0] -eq 'R' -or $code[0] -eq 'C') {
+            $i++
+            $paths.Add($entries[$i])
+        }
+        $i++
+    }
+    return $paths.ToArray()
+}
+
+function ConvertTo-RepoRelativePath {
+    param([string]$Path)
+    $p = $Path.Trim().Replace('\', '/')
+    while ($p.StartsWith('./')) { $p = $p.Substring(2) }
+    return $p
+}
+
+function Get-OwnershipViolation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$AllowedPaths,
+        [string]$RepoPath = (Get-Location).Path
+    )
+    $allowed = @($AllowedPaths | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim().Length -gt 0 } | ForEach-Object { ConvertTo-RepoRelativePath $_ })
+    $violations = New-Object System.Collections.Generic.List[string]
+    foreach ($changed in (Get-ChangedPath -RepoPath $RepoPath)) {
+        $path = ConvertTo-RepoRelativePath $changed
+        $ok = $false
+        foreach ($entry in $allowed) {
+            if ($entry.EndsWith('/')) {
+                if ($path.StartsWith($entry, [System.StringComparison]::Ordinal)) { $ok = $true }
+            }
+            elseif ($path -ceq $entry) { $ok = $true }
+        }
+        if (-not $ok) { $violations.Add($path) }
+    }
+    return $violations.ToArray()
+}
+
+function Get-Sha256Hex {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-RepoSnapshot {
+    [CmdletBinding()]
+    param([string]$RepoPath = (Get-Location).Path)
+    $head = (Invoke-Git -RepoPath $RepoPath -Arguments @('rev-parse', 'HEAD')).Trim()
+    $status = (Invoke-Git -RepoPath $RepoPath -Arguments @('status', '--porcelain=v1', '-uall')).Trim()
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        Invoke-Git -RepoPath $RepoPath -Arguments @('diff', 'HEAD', '--binary', "--output=$tmp") | Out-Null
+        $diffSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLowerInvariant()
+    }
+    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    $untracked = @(Split-NulList (Invoke-Git -RepoPath $RepoPath -Arguments @('ls-files', '--others', '--exclude-standard', '-z')) | Sort-Object)
+    $lines = foreach ($u in $untracked) {
+        $full = Join-Path $RepoPath $u
+        if (Test-Path -LiteralPath $full -PathType Leaf) { $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $full).Hash.ToLowerInvariant() } else { $h = 'missing' }
+        "$u`t$h"
+    }
+    $untrackedSha = Get-Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes((@($lines) -join "`n")))
+    return [pscustomobject]@{ head = $head; status = $status; diffSha256 = $diffSha; untrackedSha256 = $untrackedSha }
+}
+
+function Compare-RepoSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After
+    )
+    $changed = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('head', 'status', 'diffSha256', 'untrackedSha256')) {
+        if ([string](Get-OptionalProperty $Before $name) -cne [string](Get-OptionalProperty $After $name)) { $changed.Add($name) }
+    }
+    return $changed.ToArray()
+}
