@@ -334,3 +334,48 @@ function Get-ReportDecision {
     if (-not $match.Success) { throw "invalid $Kind report header in ${Path}: '$first'" }
     return $match.Groups[1].Value
 }
+
+function Start-PipelineTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('worker', 'verifier', 'verdict')][string]$Role,
+        [Parameter(Mandatory = $true)][string]$RunDir,
+        [Parameter(Mandatory = $true)][int]$Round,
+        [string]$FindingsPath,
+        [string]$Terminal,
+        [string]$OrcaExe = (Get-DefaultOrcaExe),
+        [string]$RolesDir = (Get-DefaultRolesDir)
+    )
+    if ($Role -ne 'verdict' -and -not $Terminal) { throw "Terminal is required for the $Role role" }
+    $spec = New-PipelineTaskSpec -Role $Role -RunDir $RunDir -Round $Round -FindingsPath $FindingsPath -RolesDir $RolesDir
+    $title = "$Role-$(Split-Path -Leaf $RunDir)-r$Round"
+    if ($Role -eq 'verdict') {
+        $startArgs = @('orchestration', 'worker-start', '--spec', $spec, '--task-title', $title, '--worktree', 'current', '--agent', 'claude', '--model', 'claude-opus-5-5', '--effort', 'max', '--timeout-ms', '180000', '--json')
+    }
+    else {
+        $createdText = Invoke-Orca -OrcaExe $OrcaExe -Arguments @('orchestration', 'task-create', '--spec', $spec, '--task-title', $title, '--json')
+        $created = ConvertFrom-OrcaJson $createdText
+        if (-not $created.ok) { throw "orca task-create failed: $((Get-OptionalProperty $created 'error').message)" }
+        $taskMatch = [regex]::Match($createdText, '"id"\s*:\s*"(task_[^"]+)"')
+        if (-not $taskMatch.Success) { throw "orca task-create returned no task id: $createdText" }
+        $startArgs = @('orchestration', 'worker-start', '--task', $taskMatch.Groups[1].Value, '--worktree', 'current', '--terminal', $Terminal, '--timeout-ms', '120000', '--json')
+    }
+    $receipt = ConvertFrom-OrcaJson (Invoke-Orca -OrcaExe $OrcaExe -Arguments $startArgs)
+    if (-not $receipt.ok) { throw "orca worker-start failed: $((Get-OptionalProperty $receipt 'error').message)" }
+    $result = $receipt.result
+    $state = Get-OptionalProperty $result 'state'
+    $stage = Get-OptionalProperty $result 'stage'
+    $dispatchId = Get-OptionalProperty $result 'dispatchId'
+    if ($state -eq 'failed' -or $state -eq 'outcome_unknown') {
+        $failedStage = Get-OptionalProperty $result 'failedStage'
+        if (-not $failedStage) { $failedStage = $stage }
+        throw "worker-start failed at ${failedStage}: $(Get-OptionalProperty $result 'recovery')"
+    }
+    $effective = Get-OptionalProperty (Get-OptionalProperty $result 'launch') 'effective'
+    $effectiveModel = Get-OptionalProperty $effective 'model'
+    $effectiveEffort = Get-OptionalProperty $effective 'effort'
+    if ($Role -eq 'verdict' -and ($effectiveModel -cne 'claude-opus-5-5' -or $effectiveEffort -cne 'max')) {
+        throw "launch mismatch for ${dispatchId}: effective $effectiveModel/$effectiveEffort"
+    }
+    return [pscustomobject]@{ role = $Role; round = $Round; taskId = (Get-OptionalProperty $result 'taskId'); dispatchId = $dispatchId; stage = $stage; effectiveModel = $effectiveModel; effectiveEffort = $effectiveEffort }
+}
