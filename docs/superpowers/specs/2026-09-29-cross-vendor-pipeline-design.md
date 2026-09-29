@@ -183,7 +183,13 @@ On `APPROVE`, the Architect stages only the Ownership paths and commits with the
 
 ## 13. Risks and open issues
 
-- **Unsandboxed Codex.** The Worker and the Verifier run with Codex's sandbox bypassed, which is Orca's default. Mitigation: the Ownership check, the read-only snapshots, and the Final Verdict's diff review.
+- **Unsandboxed Codex.** The Worker and the Verifier run with Codex's sandbox bypassed, which is Orca's default.
+  - **What the guards cover:** tracked and untracked (non-ignored) files in this worktree, through the ownership check and the read-only snapshots. The brief is covered by a SHA-256 the Architect keeps in its own context. The snapshot baselines are covered by fingerprints, also kept in the Architect's context.
+  - **What they do not cover:**
+    - git-ignored paths such as `node_modules/`, build outputs, or the run folder's reports;
+    - git refs, the stash, and pushes. These are shared by every worktree, so guarding them would stop runs whenever other sessions work in parallel;
+    - files outside the repository, and network access.
+  - "Nothing is pushed" therefore rests on the role instructions and `AGENTS.md` for the Codex roles, backed by the Final Verdict's review.
 - **Orca readiness defect.** The warm-terminal path depends on current Orca and Codex behavior. Report both issues (hook-based readiness with Codex 0.158, and Luna `max` validation) to stablyai/orca, then revisit native `worker-start --agent codex` when fixed. Whether Codex 0.144 behaved differently is unverified.
 - **Model evidence for warm terminals.** It comes from the TUI status line, not from Orca's `launch.effective`.
 - **Global Codex instructions.** `~/.codex/AGENTS.md` still asks every Codex session to orchestrate and to consult Jev. The repo `AGENTS.md` and the task specs override this. The spike workers complied, but this is instruction-level, not enforced.
