@@ -21,7 +21,7 @@ State the classification to the user before acting.
 
 ## 1. Preconditions
 
-- `& $orca status --json` must show `"runtimeReachable": true`. If it does not, stop and ask the user to open Orca.
+- `& $orca status --json` must show `"reachable": true` in its runtime block (the text-mode label for the same field is `runtimeReachable`). If it does not, stop and ask the user to open Orca.
 - `git status --porcelain` must be empty. If it is not, stop and ask the user to commit or stash their work.
 
 ## 2. Start the run
@@ -49,6 +49,7 @@ State the classification to the user before acting.
   Record `$w.statusLine`, which must be `GPT-6-Luna max`, in the ledger. A non-zero exit means: retry once, then stop and report.
 - **Dispatch:**
   `& "$S/start-task.ps1" -Role worker -RunDir .scratch/pipeline/<run> -Round <N> -Terminal <luna handle> [-FindingsPath <previous verifier or verdict report>]`
+  A `stage` of `input_submitted_after_paste` is normal: Codex swallowed Orca's Enter for a long task and `start-task.ps1` pressed it once. Record it in the ledger.
 - **Wait:** `& "$S/wait-worker.ps1" -DispatchId <dispatchId>`
   - `kind: done`: run `& $orca orchestration worker-release --dispatch <dispatchId> --json`. Orca reports `retained` because the Luna terminal existed before the dispatch, so the terminal stays open for fix rounds. `outcome: failed` consumes this round.
   - `kind: attention`: answer questions with `& $orca orchestration reply --id <message id> --body "<answer>" --json`, then acknowledge with `& $orca orchestration check --ack <deliveryId> --json` and wait again. Treat an unexpected `worker_done` as a protocol error and report it.
@@ -58,7 +59,7 @@ State the classification to the user before acting.
 
 ```powershell
 git diff HEAD --binary --output=.scratch/pipeline/<run>/diff-r<N>.patch
-git ls-files --others --exclude-standard | Set-Content .scratch/pipeline/<run>/untracked-r<N>.txt -Encoding UTF8
+[System.IO.File]::WriteAllLines((Join-Path (Get-Location) '.scratch/pipeline/<run>/untracked-r<N>.txt'), [string[]]@(git ls-files --others --exclude-standard))
 & "$S/check-ownership.ps1" -Allowed '<ownership entries, comma separated>'
 ```
 
@@ -78,7 +79,7 @@ $v = & "$S/warm-codex.ps1" -Model gpt-6-sol -Effort xhigh -Title sol-<run>-r<N> 
 
 - If the final command exits 1, the Verifier changed the repository. Void its report, record the changed fields in the ledger, and stop the run.
 - Read the decision:
-  `powershell -NoProfile -Command "Import-Module $S/Pipeline.psm1; Get-ReportDecision -Path .scratch/pipeline/<run>/verifier-r<N>.md -Kind verifier"`
+  `& "$S/report-decision.ps1" -Path .scratch/pipeline/<run>/verifier-r<N>.md -Kind verifier` prints `PASS` or `FAIL`. Exit 1 means the header is invalid; treat that as `FAIL`.
 - `FAIL` sends the findings (`verifier-r<N>.md`) to the next round. If this was round 3, stop and ask the user.
 
 ### 3d. Final Verdict (fresh Claude session every round)
@@ -92,7 +93,7 @@ $v = & "$S/warm-codex.ps1" -Model gpt-6-sol -Effort xhigh -Title sol-<run>-r<N> 
 ```
 
 - Record `effectiveModel/effectiveEffort` (`claude-opus-5-5/max`) in the ledger. Handle a snapshot change the same way as in 3c.
-- Read the decision with `Get-ReportDecision -Kind verdict`.
+- Read the decision with `& "$S/report-decision.ps1" -Path .scratch/pipeline/<run>/verdict-r<N>.md -Kind verdict`, which prints `APPROVE` or `CHANGES_REQUESTED`. Exit 1 means the header is invalid; treat that as `CHANGES_REQUESTED`.
 - `CHANGES_REQUESTED` sends the findings (`verdict-r<N>.md`) to the next round. If this was round 3, stop and ask the user.
 - `APPROVE`: go to 4.
 

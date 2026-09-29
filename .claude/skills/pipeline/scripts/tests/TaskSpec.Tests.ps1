@@ -94,3 +94,21 @@ Describe 'Get-ReportDecision' {
         { Get-ReportDecision -Path (Join-Path $TestDrive 'none.md') -Kind verdict } | Should Throw 'report not found'
     }
 }
+
+Describe 'report-decision.ps1' {
+    It 'prints the decision and exits 0' {
+        $p = Join-Path $TestDrive 'rd-pass.md'
+        Set-Content -LiteralPath $p -Value "RESULT: PASS`nok" -Encoding UTF8
+        $script = Join-Path $PSScriptRoot '..\report-decision.ps1'
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Path $p -Kind verifier
+        $LASTEXITCODE | Should Be 0
+        ($out | Out-String).Trim() | Should BeExactly 'PASS'
+    }
+    It 'exits 1 on an invalid header' {
+        $p = Join-Path $TestDrive 'rd-bad.md'
+        Set-Content -LiteralPath $p -Value 'Summary' -Encoding UTF8
+        $script = Join-Path $PSScriptRoot '..\report-decision.ps1'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Path $p -Kind verdict 2>$null | Out-Null
+        $LASTEXITCODE | Should Be 1
+    }
+}
