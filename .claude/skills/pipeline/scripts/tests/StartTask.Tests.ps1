@@ -66,3 +66,55 @@ Describe 'Start-PipelineTask' {
         }
     }
 }
+
+$global:StartUnobserved = '{"ok":true,"result":{"taskId":"task_abc","dispatchId":"ctx_p","state":"outcome_unknown","stage":"turn_start_unobserved","failedStage":"turn_start_unobserved","recovery":""}}'
+$global:ScreenPasted = "handle: term_w`r`n[char]0x203A [Pasted Content 6819 chars]`r`n  GPT-6-Luna max`r`n"
+$global:ScreenSubmitted = "handle: term_w`r`n  Working (3s)`r`n  GPT-6-Luna max`r`n"
+
+Describe 'Start-PipelineTask pending paste recovery' {
+    Context 'turn start unobserved with the task still pasted in the composer' {
+        $global:PasteReads = 0
+        Mock -ModuleName Pipeline Start-Sleep { }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:CreateOk } -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:StartUnobserved } -ParameterFilter { $Arguments[1] -eq 'worker-start' }
+        Mock -ModuleName Pipeline Invoke-Orca { '{"ok":true}' } -ParameterFilter { $Arguments[1] -eq 'send' }
+        Mock -ModuleName Pipeline Invoke-Orca {
+            $global:PasteReads++
+            if ($global:PasteReads -eq 1) { return $global:ScreenPasted }
+            return $global:ScreenSubmitted
+        } -ParameterFilter { $Arguments[1] -eq 'read' }
+
+        It 'presses Enter once and reports the submitted dispatch' {
+            $r = Start-PipelineTask -Role worker -RunDir (New-RunDir) -Round 1 -Terminal 'term_w' -OrcaExe 'orca.exe' -RolesDir $global:RolesDirForTests
+            $r.dispatchId | Should BeExactly 'ctx_p'
+            $r.stage | Should BeExactly 'input_submitted_after_paste'
+            Assert-MockCalled Invoke-Orca -ModuleName Pipeline -Exactly -Times 1 -ParameterFilter { $Arguments[1] -eq 'send' -and $Arguments -contains '--enter' -and $Arguments -contains 'term_w' -and -not ($Arguments -contains '--text') }
+        }
+    }
+
+    Context 'turn start unobserved without a pending paste' {
+        Mock -ModuleName Pipeline Start-Sleep { }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:CreateOk } -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:StartUnobserved } -ParameterFilter { $Arguments[1] -eq 'worker-start' }
+        Mock -ModuleName Pipeline Invoke-Orca { '{"ok":true}' } -ParameterFilter { $Arguments[1] -eq 'send' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:ScreenSubmitted } -ParameterFilter { $Arguments[1] -eq 'read' }
+
+        It 'throws the unobserved stage without sending anything' {
+            { Start-PipelineTask -Role worker -RunDir (New-RunDir) -Round 1 -Terminal 'term_w' -OrcaExe 'orca.exe' -RolesDir $global:RolesDirForTests } | Should Throw 'worker-start failed at turn_start_unobserved'
+            Assert-MockCalled Invoke-Orca -ModuleName Pipeline -Exactly -Times 0 -ParameterFilter { $Arguments[1] -eq 'send' }
+        }
+    }
+
+    Context 'paste never leaves the composer' {
+        Mock -ModuleName Pipeline Start-Sleep { }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:CreateOk } -ParameterFilter { $Arguments[1] -eq 'task-create' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:StartUnobserved } -ParameterFilter { $Arguments[1] -eq 'worker-start' }
+        Mock -ModuleName Pipeline Invoke-Orca { '{"ok":true}' } -ParameterFilter { $Arguments[1] -eq 'send' }
+        Mock -ModuleName Pipeline Invoke-Orca { $global:ScreenPasted } -ParameterFilter { $Arguments[1] -eq 'read' }
+
+        It 'throws after one Enter instead of pressing Enter repeatedly' {
+            { Start-PipelineTask -Role worker -RunDir (New-RunDir) -Round 1 -Terminal 'term_w' -OrcaExe 'orca.exe' -RolesDir $global:RolesDirForTests } | Should Throw 'worker-start failed at turn_start_unobserved'
+            Assert-MockCalled Invoke-Orca -ModuleName Pipeline -Exactly -Times 1 -ParameterFilter { $Arguments[1] -eq 'send' }
+        }
+    }
+}

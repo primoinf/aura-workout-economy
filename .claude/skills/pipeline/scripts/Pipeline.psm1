@@ -369,7 +369,12 @@ function Start-PipelineTask {
     if ($state -eq 'failed' -or $state -eq 'outcome_unknown') {
         $failedStage = Get-OptionalProperty $result 'failedStage'
         if (-not $failedStage) { $failedStage = $stage }
-        throw "worker-start failed at ${failedStage}: $(Get-OptionalProperty $result 'recovery')"
+        $recovered = $false
+        if ($Role -ne 'verdict' -and $failedStage -eq 'turn_start_unobserved') {
+            $recovered = Submit-PendingCodexPaste -OrcaExe $OrcaExe -Handle $Terminal
+        }
+        if (-not $recovered) { throw "worker-start failed at ${failedStage}: $(Get-OptionalProperty $result 'recovery')" }
+        $stage = 'input_submitted_after_paste'
     }
     $effective = Get-OptionalProperty (Get-OptionalProperty $result 'launch') 'effective'
     $effectiveModel = Get-OptionalProperty $effective 'model'
@@ -378,4 +383,25 @@ function Start-PipelineTask {
         throw "launch mismatch for ${dispatchId}: effective $effectiveModel/$effectiveEffort"
     }
     return [pscustomobject]@{ role = $Role; round = $Round; taskId = (Get-OptionalProperty $result 'taskId'); dispatchId = $dispatchId; stage = $stage; effectiveModel = $effectiveModel; effectiveEffort = $effectiveEffort }
+}
+
+function Submit-PendingCodexPaste {
+    param(
+        [string]$OrcaExe,
+        [string]$Handle,
+        [int]$Attempts = 10,
+        [int]$PollSeconds = 2
+    )
+    # Codex can treat a long injected task as a paste burst and swallow Orca's Enter,
+    # leaving '[Pasted Content N chars]' unsubmitted. Press Enter once, then confirm.
+    $screen = Read-OrcaScreen -OrcaExe $OrcaExe -Handle $Handle
+    if ($screen -notmatch '\[Pasted Content') { return $false }
+    $sent = ConvertFrom-OrcaJson (Invoke-Orca -OrcaExe $OrcaExe -Arguments @('terminal', 'send', '--terminal', $Handle, '--enter', '--json'))
+    if (-not $sent.ok) { return $false }
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        Start-Sleep -Seconds $PollSeconds
+        $screen = Read-OrcaScreen -OrcaExe $OrcaExe -Handle $Handle
+        if ($screen -notmatch '\[Pasted Content') { return $true }
+    }
+    return $false
 }
