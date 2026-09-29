@@ -120,3 +120,51 @@ function Invoke-WarmCodex {
         throw
     }
 }
+
+function Get-OrcaMessagePayload {
+    param($Message)
+    $payload = Get-OptionalProperty $Message 'payload'
+    if ($payload -is [string]) { return ($payload | ConvertFrom-Json) }
+    return $payload
+}
+
+function Test-ExpectedWorkerDone {
+    param($Message, [string]$DispatchId)
+    if ((Get-OptionalProperty $Message 'type') -ne 'worker_done') { return $false }
+    $payload = Get-OrcaMessagePayload $Message
+    return ((Get-OptionalProperty $payload 'dispatchId') -eq $DispatchId)
+}
+
+function Wait-PipelineWorkerDone {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$DispatchId,
+        [string]$OrcaExe = (Get-DefaultOrcaExe),
+        [int]$WaitTimeoutMs = 900000,
+        [int]$MaxEmptyWaits = 3
+    )
+    $empty = 0
+    while ($true) {
+        $reply = ConvertFrom-OrcaJson (Invoke-Orca -OrcaExe $OrcaExe -Arguments @('orchestration', 'check', '--wait', '--types', 'worker_done,escalation,question', '--timeout-ms', "$WaitTimeoutMs", '--json'))
+        if (-not $reply.ok) { throw "orca orchestration check failed: $((Get-OptionalProperty $reply 'error').message)" }
+        $result = $reply.result
+        $messages = @(@(Get-OptionalProperty $result 'messages') | Where-Object { $null -ne $_ })
+        if ((Get-OptionalProperty $result 'timedOut') -or $messages.Count -eq 0) {
+            $empty++
+            if ($empty -ge $MaxEmptyWaits) {
+                return [pscustomobject]@{ kind = 'stalled'; dispatchId = $DispatchId; deliveryId = $null; outcome = $null; body = $null; messages = @() }
+            }
+            continue
+        }
+        $empty = 0
+        $deliveryId = Get-OptionalProperty $result 'deliveryId'
+        $expected = @($messages | Where-Object { Test-ExpectedWorkerDone -Message $_ -DispatchId $DispatchId })
+        if ($expected.Count -eq 1 -and $messages.Count -eq 1) {
+            $ack = ConvertFrom-OrcaJson (Invoke-Orca -OrcaExe $OrcaExe -Arguments @('orchestration', 'check', '--ack', $deliveryId, '--json'))
+            if (-not $ack.ok) { throw "orca orchestration ack failed: $((Get-OptionalProperty $ack 'error').message)" }
+            $payload = Get-OrcaMessagePayload $expected[0]
+            return [pscustomobject]@{ kind = 'done'; dispatchId = $DispatchId; deliveryId = $deliveryId; outcome = (Get-OptionalProperty $payload 'outcome'); body = (Get-OptionalProperty $expected[0] 'body'); messages = $messages }
+        }
+        return [pscustomobject]@{ kind = 'attention'; dispatchId = $DispatchId; deliveryId = $deliveryId; outcome = $null; body = $null; messages = $messages }
+    }
+}
