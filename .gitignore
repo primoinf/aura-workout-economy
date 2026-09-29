@@ -5,3 +5,4 @@ codex-mission-control/dist/
 .DS_Store
 .agents/
 .gemini/
+.scratch/pipeline/
