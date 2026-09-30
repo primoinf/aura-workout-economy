@@ -13,7 +13,7 @@ Run substantial coding work through a fixed, verifiable chain of agents from two
 | --- | --- | --- |
 | Architect | Claude Opus 5.5 / xhigh | Claude Code (main session) |
 | Worker | GPT-6 Luna / max | Codex |
-| Independent Verifier | GPT-6 Sol / xhigh | Codex |
+| Independent Verifier | GPT-6.1 Sol / xhigh | Codex |
 | Final Verdict | Claude Opus 5.5 / max | Claude Code |
 | Small-task implementer | Claude Sonnet 5.5 / medium | Claude Code subagent |
 

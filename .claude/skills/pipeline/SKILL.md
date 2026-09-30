@@ -1,6 +1,6 @@
 ---
 name: pipeline
-description: Cross-vendor coding pipeline for this repository. This Claude Opus 5.5 xhigh session is the Architect; Codex GPT-6 Luna max implements, Codex GPT-6 Sol xhigh verifies independently, and a fresh Claude Opus 5.5 max session gives the final verdict, all orchestrated through Orca. Use when the user types /pipeline or asks for the pipeline, or when a coding request meets the sizing rule (more than 3 files or more than one module, a behavior change that needs tests, or security, auth, data, migration, or public-interface changes). For smaller localized edits, delegate to the sonnet-small subagent instead.
+description: Cross-vendor coding pipeline for this repository. This Claude Opus 5.5 xhigh session is the Architect; Codex GPT-6 Luna max implements, Codex GPT-6.1 Sol xhigh verifies independently, and a fresh Claude Opus 5.5 max session gives the final verdict, all orchestrated through Orca. Use when the user types /pipeline or asks for the pipeline, or when a coding request meets the sizing rule (more than 3 files or more than one module, a behavior change that needs tests, or security, auth, data, migration, or public-interface changes). For smaller localized edits, delegate to the sonnet-small subagent instead.
 ---
 
 # Pipeline (Architect playbook)
@@ -96,9 +96,9 @@ Run one step per tool call. Check each result before the next step.
    Keep the printed `fingerprint` in your context.
 2. Warm Sol, with a tool timeout of at least 420000 ms:
    ```powershell
-   & "$PipelineScripts/warm-codex.ps1" -Model gpt-6-sol -Effort xhigh -Title sol-<run>-r<N> -HandleFile .scratch/pipeline/<run>/sol-r<N>.handle
+   & "$PipelineScripts/warm-codex.ps1" -Model gpt-6.1-sol -Effort xhigh -Title sol-<run>-r<N> -HandleFile .scratch/pipeline/<run>/sol-r<N>.handle
    ```
-   The `statusLine` must be `GPT-6-Sol xhigh`.
+   The `statusLine` must be `GPT-6.1-Sol xhigh`.
 3. Dispatch:
    ```powershell
    & "$PipelineScripts/start-task.ps1" -Role verifier -RunDir .scratch/pipeline/<run> -Round <N> -Terminal <sol handle> -BriefSha256 <briefSha>
