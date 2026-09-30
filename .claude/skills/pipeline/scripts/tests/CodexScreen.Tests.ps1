@@ -11,6 +11,9 @@ Describe 'Get-CodexStatusLabel' {
     It 'formats GPT-6 Sol xhigh' {
         Get-CodexStatusLabel -Model 'gpt-6-sol' -Effort 'xhigh' | Should BeExactly 'GPT-6-Sol xhigh'
     }
+    It 'formats GPT-6.1 Sol xhigh' {
+        Get-CodexStatusLabel -Model 'gpt-6.1-sol' -Effort 'xhigh' | Should BeExactly 'GPT-6.1-Sol xhigh'
+    }
     It 'lowercases the effort' {
         Get-CodexStatusLabel -Model 'gpt-6-sol' -Effort 'XHIGH' | Should BeExactly 'GPT-6-Sol xhigh'
     }
@@ -26,6 +29,10 @@ Describe 'Find-CodexStatusLabel' {
     It 'finds the status label on a ready screen' {
         $screen = "handle: term_1`r`n  >_ OpenAI Codex (v0.158.0)`r`n$chevron Ask Codex to do anything`r`n  GPT-6-Luna max $dot ~\repo`r`n"
         Find-CodexStatusLabel -ScreenText $screen | Should BeExactly 'GPT-6-Luna max'
+    }
+    It 'finds the dotted model status label on a ready screen' {
+        $screen = "handle: term_1`r`n  >_ OpenAI Codex (v0.158.0)`r`n$chevron Ask Codex to do anything`r`n  GPT-6.1-Sol xhigh $dot ~\repo`r`n"
+        Find-CodexStatusLabel -ScreenText $screen | Should BeExactly 'GPT-6.1-Sol xhigh'
     }
     It 'returns the last label when the status line changed' {
         $screen = "  GPT-6-Luna low $dot ~\repo`r`nother`r`n  GPT-6-Luna max $dot ~\repo`r`n"
